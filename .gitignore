@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Runtime database (regenerated; not source)
+events.db
+events.db-wal
+events.db-shm
+
+# Logs
+*.log
+motion_log.txt
