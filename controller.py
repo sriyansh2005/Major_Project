@@ -39,6 +39,7 @@ WINDOW_SIZE = 15            # weighted moving average window (debounces the PIR)
 THRESHOLD = 0.6            # filtered value above this = motion
 PRESENCE_SECONDS = 5       # sustained motion before auto-action fires
 GRACE_SECONDS = 2.0        # keep counting through brief PIR drop-outs (pulsing)
+AWAY_SECONDS = 60          # no motion this long => person left => turn all off
 WARMUP_SECONDS = 30        # PIR needs time to settle after power-on
 DEBUG = False              # True prints filtered value + held timer each loop
 
@@ -57,7 +58,8 @@ DISPATCH = {
 
 
 def apply_pending_commands():
-    """Apply any commands the agent queued, newest state wins."""
+    """Apply any commands the agent queued. Returns how many were applied."""
+    applied = 0
     for cmd in fetch_pending_commands():
         name, args = cmd["name"], json.loads(cmd["args"])
         fn = DISPATCH.get(name)
@@ -65,7 +67,9 @@ def apply_pending_commands():
             result = fn(args)
             log_action(name, json.dumps(args), json.dumps(result))
             print(f"  [agent cmd] {name}({args}) -> {result}")
+            applied += 1
         mark_command_done(cmd["id"])
+    return applied
 
 
 def main():
@@ -80,15 +84,18 @@ def main():
     print("Controller ready. Watching for presence + agent commands.")
 
     samples = deque([0] * WINDOW_SIZE, maxlen=WINDOW_SIZE)
-    present = False           # auto-action already fired for this presence
-    motion_since = None       # when the current presence window began
-    last_motion = None        # last time motion was seen (for grace period)
+    present = False           # currently in a presence session
+    manual_override = False   # user gave a command -> PIR won't touch devices
+    motion_since = None       # when current continuous motion began (entry timer)
+    last_motion = None        # last time motion was seen
     last_debug = 0.0
 
     try:
         while True:
-            # 1) Apply anything the agent queued.
-            apply_pending_commands()
+            # 1) Apply anything the agent queued. A user command takes over:
+            #    the PIR will not overwrite the devices for this visit.
+            if apply_pending_commands():
+                manual_override = True
 
             # 2) Read + filter the PIR.
             samples.append(pir.value)
@@ -99,34 +106,43 @@ def main():
                 last_motion = now
                 if motion_since is None:
                     motion_since = now
+            elif last_motion is None or (now - last_motion) > GRACE_SECONDS:
+                # gap longer than grace -> reset the entry timer
+                motion_since = None
 
-            # Grace: treat presence as ongoing if motion was seen within the
-            # last GRACE_SECONDS, so brief PIR drop-outs don't reset the timer.
-            active = last_motion is not None and (now - last_motion) <= GRACE_SECONDS
-            held = (now - motion_since) if (active and motion_since) else 0.0
+            held = (now - motion_since) if motion_since else 0.0
+            away_for = (now - last_motion) if last_motion is not None else None
 
-            # 3) Presence state machine.
-            if active:
-                if not present and held >= PRESENCE_SECONDS:
+            # 3a) ENTRY: fresh arrival -> apply yellow defaults (unless the
+            #     user already gave a command, which then wins).
+            if not present and held >= PRESENCE_SECONDS:
+                present = True
+                if manual_override:
+                    print(">>> Presence, but keeping your command")
+                else:
                     print(">>> PRESENCE confirmed -> fan 50%, LED yellow")
-                    log_presence("present")
                     r1 = set_fan(True, AUTO_FAN_SPEED)
                     r2 = set_led(AUTO_LED_COLOR)
                     log_action("set_fan", json.dumps({"on": True, "speed": AUTO_FAN_SPEED}), json.dumps(r1))
                     log_action("set_led", json.dumps({"color": AUTO_LED_COLOR}), json.dumps(r2))
-                    present = True
-            else:
-                # Grace expired: reset so the next entry re-triggers.
-                if present:
-                    print(">>> No motion")
-                    log_presence("absent")
+                log_presence("present")
+
+            # 3b) EXIT: no motion for a long time -> person left, turn all off.
+            elif present and away_for is not None and away_for > AWAY_SECONDS:
+                print(">>> Person left -> turning off fan + LED")
+                r1 = set_fan(False)
+                r2 = set_led("off")
+                log_action("set_fan", json.dumps({"on": False}), json.dumps(r1))
+                log_action("set_led", json.dumps({"color": "off"}), json.dumps(r2))
+                log_presence("absent")
                 present = False
+                manual_override = False
                 motion_since = None
 
-            # 4) Debug view so you can watch the timer climb to 5s.
+            # 4) Debug view so you can watch the timer climb.
             if DEBUG and now - last_debug >= 0.5:
                 print(f"raw={pir.value} filtered={filtered:.2f} held={held:.1f}s "
-                      f"active={active} present={present}")
+                      f"away_for={away_for} present={present} override={manual_override}")
                 last_debug = now
 
             sleep(SAMPLE_TIME)
