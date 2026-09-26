@@ -73,7 +73,10 @@ def handle(user_text: str, history: list) -> str:
     if not tool_calls:
         return msg.get("content", "") or "(no reply)"
 
-    # Execute each requested tool and feed the result back to the model.
+    # Execute each requested tool. We do NOT make a second Qwen call to
+    # summarise -- on the Pi that doubles the wait and often hangs. Instead
+    # we build the reply from the tool results directly.
+    done = []
     for call in tool_calls:
         name = call["function"]["name"]
         args = json.loads(call["function"]["arguments"] or "{}")
@@ -81,18 +84,9 @@ def handle(user_text: str, history: list) -> str:
         result = fn(**args) if fn else {"error": f"unknown tool {name}"}
         log_action(name, json.dumps(args), json.dumps(result))
         print(f"  [tool] {name}({args}) -> {result}")
-        history.append(
-            {
-                "role": "tool",
-                "tool_call_id": call.get("id", name),
-                "content": json.dumps(result),
-            }
-        )
+        done.append(f"{name} {args}")
 
-    # Let the model summarise what it did.
-    final = ask_qwen(history)
-    history.append(final)
-    return final.get("content", "") or "Done (command sent to the controller)."
+    return "Queued: " + "; ".join(done)
 
 
 def build_system_prompt() -> str:

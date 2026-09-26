@@ -28,6 +28,7 @@ from system.behaviour_log import (
     log_presence,
     fetch_pending_commands,
     mark_command_done,
+    flush_pending_commands,
 )
 
 # --- Settings ---------------------------------------------------------------
@@ -69,6 +70,9 @@ def apply_pending_commands():
 
 def main():
     init_db()
+    cleared = flush_pending_commands()   # drop stale commands from last run
+    if cleared:
+        print(f"Cleared {cleared} stale queued command(s).")
     pir = DigitalInputDevice(PIR_PIN)
 
     print(f"PIR warming up ({WARMUP_SECONDS}s)...")

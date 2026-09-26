@@ -118,6 +118,17 @@ def mark_command_done(cmd_id: int):
         c.execute("UPDATE commands SET status='done' WHERE id=?", (cmd_id,))
 
 
+def flush_pending_commands() -> int:
+    """Controller side: drop any leftover commands from a previous session.
+
+    Call once at startup so stale queued commands don't fire automatically
+    before the PIR or the user asks for anything. Returns how many were cleared.
+    """
+    with _conn() as c:
+        cur = c.execute("UPDATE commands SET status='done' WHERE status='pending'")
+        return cur.rowcount
+
+
 def recent_events(limit: int = 20) -> list:
     """Return the most recent events, newest first."""
     with _conn() as c:
