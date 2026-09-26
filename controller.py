@@ -40,7 +40,7 @@ THRESHOLD = 0.6            # filtered value above this = motion
 PRESENCE_SECONDS = 5       # sustained motion before auto-action fires
 GRACE_SECONDS = 2.0        # keep counting through brief PIR drop-outs (pulsing)
 WARMUP_SECONDS = 30        # PIR needs time to settle after power-on
-DEBUG = True               # print filtered value + held timer while watching
+DEBUG = False              # True prints filtered value + held timer each loop
 
 # Defaults applied automatically when a person is detected.
 AUTO_FAN_SPEED = 50
