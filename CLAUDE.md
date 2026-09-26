@@ -52,16 +52,36 @@ can have a single owner); the agent sends requests through a shared SQLite queue
   row into the `commands` table → the controller applies it (~20×/sec poll) →
   hardware moves. This lets you override the presence defaults by talking.
 
+### Repository layout
+
+```
+Major-project/
+├── controller.py          # entry point 1 — hardware owner (PIR + queue applier)
+├── agent.py               # entry point 2 — Qwen loop (queues commands)
+├── devices/               # hardware drivers (imported only by controller.py)
+│   ├── fan_control.py      #   set_fan / get_fan  (L298N PWM)
+│   └── led_control.py      #   set_led / get_led  (digital RGB)
+├── system/                # brain + storage (GPIO-free)
+│   ├── tool_schemas.py     #   LLM tool definitions
+│   └── behaviour_log.py    #   SQLite events log + command queue + patterns
+├── events.db              # runtime DB (generated; git-ignored)
+├── requirements.txt
+└── CLAUDE.md
+```
+
+The two entry points stay at the root so you run them the same way
+(`python controller.py`, `python agent.py`) from the project directory.
+
 ### Files
 
 | File | Role | Touches GPIO? |
 |---|---|---|
-| `fan_control.py` | Fan functions (`set_fan`, `get_fan`) + PWM logic | yes (via controller) |
-| `led_control.py` | LED functions (`set_led`, `get_led`), digital colours | yes (via controller) |
+| `devices/fan_control.py` | Fan functions (`set_fan`, `get_fan`) + PWM logic | yes (via controller) |
+| `devices/led_control.py` | LED functions (`set_led`, `get_led`), digital colours | yes (via controller) |
 | `controller.py` | **HW owner.** PIR loop + applies queued commands | yes — owns all pins |
 | `agent.py` | Qwen loop. Turns speech→tool calls→**queued** commands | no |
-| `tool_schemas.py` | GPIO-free tool definitions (so agent imports no GPIO) | no |
-| `behaviour_log.py` | SQLite: `events` log + `commands` queue + patterns | no |
+| `system/tool_schemas.py` | GPIO-free tool definitions (so agent imports no GPIO) | no |
+| `system/behaviour_log.py` | SQLite: `events` log + `commands` queue + patterns | no |
 | `events.db` | SQLite database (generated at runtime; not in git) | — |
 
 ### Database (`events.db`)
@@ -79,7 +99,7 @@ can have a single owner); the agent sends requests through a shared SQLite queue
 # One-time
 python3 -m venv --system-site-packages ~/major/venv
 source ~/major/venv/bin/activate
-pip install gpiozero lgpio requests
+pip install -r requirements.txt        # gpiozero, lgpio, requests
 
 # LLM runtime
 curl -fsSL https://ollama.com/install.sh | sh

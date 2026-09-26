@@ -56,33 +56,8 @@ def get_fan() -> dict:
     return dict(_state)
 
 
-# --- Function-calling schema (for Qwen / Hermes tool use) --------------------
-FAN_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "set_fan",
-        "description": "Turn the room fan on or off and set its speed.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "on": {
-                    "type": "boolean",
-                    "description": "True to run the fan, False to stop it.",
-                },
-                "speed": {
-                    "type": "integer",
-                    "description": "Fan speed as a percentage, 0-100.",
-                    "minimum": 0,
-                    "maximum": 100,
-                },
-            },
-            "required": ["on"],
-        },
-    },
-}
-
-# Map tool name -> callable, so the agent loop can dispatch a tool call.
-TOOL_DISPATCH = {"set_fan": set_fan, "get_fan": get_fan}
+# The tool schema for the LLM lives in system/tool_schemas.py (GPIO-free), so
+# the agent can load it without importing this hardware module.
 
 
 # --- Manual test -------------------------------------------------------------

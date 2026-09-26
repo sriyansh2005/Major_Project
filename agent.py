@@ -17,8 +17,8 @@ import sys
 
 import requests
 
-from tool_schemas import TOOLS
-from behaviour_log import (
+from system.tool_schemas import TOOLS
+from system.behaviour_log import (
     init_db,
     enqueue_command,
     log_action,

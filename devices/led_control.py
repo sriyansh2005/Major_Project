@@ -60,27 +60,8 @@ def get_led() -> dict:
     return dict(_state)
 
 
-# --- Function-calling schema (for Qwen / Hermes tool use) --------------------
-LED_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "set_led",
-        "description": "Set the RGB LED to a colour, or turn it off.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "color": {
-                    "type": "string",
-                    "description": "Colour name.",
-                    "enum": list(COLORS.keys()),
-                },
-            },
-            "required": ["color"],
-        },
-    },
-}
-
-TOOL_DISPATCH = {"set_led": set_led, "get_led": get_led}
+# The tool schema for the LLM lives in system/tool_schemas.py (GPIO-free), so
+# the agent can load it without importing this hardware module.
 
 
 # --- Manual test -------------------------------------------------------------

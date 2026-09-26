@@ -3,15 +3,15 @@ Hardware controller -- the ONLY process that touches the GPIO.
 
 Runs two jobs in one loop:
   1. Watches the PIR sensor. When motion is sustained for PRESENCE_SECONDS,
-     it auto-sets the defaults: fan 50% + LED orange.
+     it auto-sets the defaults: fan 50% + LED yellow.
   2. Applies any commands the agent queued in the DB (so you can override
      the colour/speed by talking to agent.py while this keeps running).
 
 Run this in one terminal:      python controller.py
 Run the agent in another:      python agent.py
 
-Only this file imports fan_control / led_control, so the pins have a single
-owner and there is no GPIO conflict.
+Only this file imports the device modules, so the pins have a single owner
+and there is no GPIO conflict.
 """
 
 import json
@@ -20,9 +20,9 @@ from time import sleep, monotonic
 
 from gpiozero import DigitalInputDevice
 
-from fan_control import set_fan
-from led_control import set_led
-from behaviour_log import (
+from devices.fan_control import set_fan
+from devices.led_control import set_led
+from system.behaviour_log import (
     init_db,
     log_action,
     log_presence,

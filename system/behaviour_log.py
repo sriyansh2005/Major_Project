@@ -4,12 +4,12 @@ SQLite behaviour logging for the home-automation agent.
 Records every user command and every hardware action with a timestamp,
 so the agent can later learn usage patterns (e.g. "fan usually on ~9pm").
 
-The DB is a single file (events.db) next to this script. SQLite needs no
+The DB is a single file (events.db) at the project root. SQLite needs no
 server and is perfect for a Pi -- concurrent reads are fine, writes are
 serialised.
 
 Usage:
-    from behaviour_log import log_command, log_action, recent_events, summarise_patterns
+    from system.behaviour_log import log_command, log_action, summarise_patterns
 """
 
 import json
@@ -17,7 +17,8 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).with_name("events.db")
+# events.db lives at the project root (this file is in system/).
+DB_PATH = Path(__file__).resolve().parent.parent / "events.db"
 
 
 def _conn():
