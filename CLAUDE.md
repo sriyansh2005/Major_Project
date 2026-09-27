@@ -47,10 +47,15 @@ can have a single owner); the agent sends requests through a shared SQLite queue
                 (Qwen)        in events.db
 ```
 
-- **PIR path:** sustained motion ≥ 5 s → controller auto-sets fan 50% + LED yellow.
+- **PIR path:** sustained motion ≥ 5 s → controller auto-sets fan 50% + LED
+  yellow. No motion for `AWAY_SECONDS` (default 60) → person left → fan + LED
+  turn off. Coming back re-applies the yellow default.
 - **Agent path:** you type a command → Qwen picks a tool → the agent writes a
   row into the `commands` table → the controller applies it (~20×/sec poll) →
-  hardware moves. This lets you override the presence defaults by talking.
+  hardware moves.
+- **Priority:** an agent command sets `manual_override` for that visit, so the
+  PIR will not overwrite your chosen colour/speed. The override clears when you
+  leave (away-timeout).
 
 ### Repository layout
 
@@ -177,7 +182,7 @@ git checkout main           # return to latest
 
 ## 7. Known Limits / Open Questions
 
-- Presence currently only turns devices **on**; no auto-off when the user leaves
-  (can be added — timeout-based).
+- Auto-off uses a fixed `AWAY_SECONDS` timeout (60 s). If it turns off while you
+  sit still, raise it in `controller.py`.
 - LED is digital (no true orange; yellow is the presence default).
 - Phase 5 STT tech (Cartesia API vs on-device) and wake-word to be finalised.
