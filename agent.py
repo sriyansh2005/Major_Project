@@ -21,7 +21,7 @@ from system.tool_schemas import TOOLS
 from system.behaviour_log import (
     init_db,
     enqueue_command,
-    log_action,
+    get_state,
     log_command,
     summarise_patterns,
 )
@@ -31,16 +31,9 @@ OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 MODEL = "qwen2.5:3b"
 
 # The agent does NOT touch GPIO. Each tool call is queued in the DB and the
-# controller process applies it to the hardware. This is why both can run
-# at the same time without fighting over the pins.
-
-def _queue(name):
-    def _fn(**args):
-        enqueue_command(name, args)
-        return {"queued": name, "args": args}
-    return _fn
-
-TOOL_DISPATCH = {"set_fan": _queue("set_fan"), "set_led": _queue("set_led")}
+# controller process applies it to the hardware (and logs the action, linked
+# to the user's command row via parent_id).
+TOOL_NAMES = {"set_fan", "set_led"}
 
 SYSTEM_PROMPT = (
     "You control home devices on a Raspberry Pi: a fan and an RGB LED. "
@@ -64,7 +57,8 @@ def ask_qwen(messages: list) -> dict:
 
 def handle(user_text: str, history: list) -> str:
     """One turn: send user text, run any tool the model requests, return a reply."""
-    log_command(user_text)
+    # Log the user's words + the room state before anything changes.
+    cmd_id = log_command(user_text, get_state())
     history.append({"role": "user", "content": user_text})
     msg = ask_qwen(history)
     history.append(msg)
@@ -73,20 +67,21 @@ def handle(user_text: str, history: list) -> str:
     if not tool_calls:
         return msg.get("content", "") or "(no reply)"
 
-    # Execute each requested tool. We do NOT make a second Qwen call to
-    # summarise -- on the Pi that doubles the wait and often hangs. Instead
-    # we build the reply from the tool results directly.
+    # Queue each tool call, linked to the command row. No second Qwen call:
+    # on the Pi that doubles the wait.
     done = []
     for call in tool_calls:
         name = call["function"]["name"]
-        args = json.loads(call["function"]["arguments"] or "{}")
-        fn = TOOL_DISPATCH.get(name)
-        result = fn(**args) if fn else {"error": f"unknown tool {name}"}
-        log_action(name, json.dumps(args), json.dumps(result))
-        print(f"  [tool] {name}({args}) -> {result}")
+        args = call["function"]["arguments"]
+        args = json.loads(args) if isinstance(args, str) else (args or {})
+        if name not in TOOL_NAMES:
+            print(f"  [tool] unknown tool {name}, skipped")
+            continue
+        enqueue_command(name, args, parent_id=cmd_id)
+        print(f"  [tool] {name}({args}) queued")
         done.append(f"{name} {args}")
 
-    return "Queued: " + "; ".join(done)
+    return "Queued: " + "; ".join(done) if done else "(nothing to do)"
 
 
 def build_system_prompt() -> str:

@@ -20,12 +20,13 @@ from time import sleep, monotonic
 
 from gpiozero import DigitalInputDevice
 
-from devices.fan_control import set_fan
-from devices.led_control import set_led
+from devices.fan_control import set_fan, get_fan
+from devices.led_control import set_led, get_led
 from system.behaviour_log import (
     init_db,
     log_action,
     log_presence,
+    set_state,
     fetch_pending_commands,
     mark_command_done,
     flush_pending_commands,
@@ -57,16 +58,30 @@ DISPATCH = {
 }
 
 
+def snapshot() -> dict:
+    """Current room state from the device modules."""
+    fan, led = get_fan(), get_led()
+    return {"fan_on": fan["on"], "fan_speed": fan["speed"], "led": led["color"]}
+
+
+def do(tool, args, source, parent_id=None):
+    """Run one device change, publish the new state, log it with its source."""
+    before = snapshot()
+    DISPATCH[tool](args)
+    after = snapshot()
+    set_state(after["fan_on"], after["fan_speed"], after["led"])
+    log_action(tool, args, before, after, source, parent_id)
+    return after
+
+
 def apply_pending_commands():
     """Apply any commands the agent queued. Returns how many were applied."""
     applied = 0
     for cmd in fetch_pending_commands():
         name, args = cmd["name"], json.loads(cmd["args"])
-        fn = DISPATCH.get(name)
-        if fn:
-            result = fn(args)
-            log_action(name, json.dumps(args), json.dumps(result))
-            print(f"  [agent cmd] {name}({args}) -> {result}")
+        if name in DISPATCH:
+            after = do(name, args, "user", cmd["parent_id"])
+            print(f"  [agent cmd] {name}({args}) -> {after}")
             applied += 1
         mark_command_done(cmd["id"])
     return applied
@@ -74,6 +89,8 @@ def apply_pending_commands():
 
 def main():
     init_db()
+    s = snapshot()                       # publish the real starting state
+    set_state(s["fan_on"], s["fan_speed"], s["led"])
     cleared = flush_pending_commands()   # drop stale commands from last run
     if cleared:
         print(f"Cleared {cleared} stale queued command(s).")
@@ -121,19 +138,15 @@ def main():
                     print(">>> Presence, but keeping your command")
                 else:
                     print(">>> PRESENCE confirmed -> fan 50%, LED yellow")
-                    r1 = set_fan(True, AUTO_FAN_SPEED)
-                    r2 = set_led(AUTO_LED_COLOR)
-                    log_action("set_fan", json.dumps({"on": True, "speed": AUTO_FAN_SPEED}), json.dumps(r1))
-                    log_action("set_led", json.dumps({"color": AUTO_LED_COLOR}), json.dumps(r2))
+                    do("set_fan", {"on": True, "speed": AUTO_FAN_SPEED}, "pir")
+                    do("set_led", {"color": AUTO_LED_COLOR}, "pir")
                 log_presence("present")
 
             # 3b) EXIT: no motion for a long time -> person left, turn all off.
             elif present and away_for is not None and away_for > AWAY_SECONDS:
                 print(">>> Person left -> turning off fan + LED")
-                r1 = set_fan(False)
-                r2 = set_led("off")
-                log_action("set_fan", json.dumps({"on": False}), json.dumps(r1))
-                log_action("set_led", json.dumps({"color": "off"}), json.dumps(r2))
+                do("set_fan", {"on": False}, "pir")
+                do("set_led", {"color": "off"}, "pir")
                 log_presence("absent")
                 present = False
                 manual_override = False

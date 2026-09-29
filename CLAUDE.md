@@ -66,9 +66,12 @@ Major-project/
 ├── devices/               # hardware drivers (imported only by controller.py)
 │   ├── fan_control.py      #   set_fan / get_fan  (L298N PWM)
 │   └── led_control.py      #   set_led / get_led  (digital RGB)
+├── update_intents.py      # run by hand: Qwen labels commands with intents (Phase 6)
 ├── system/                # brain + storage (GPIO-free)
 │   ├── tool_schemas.py     #   LLM tool definitions
-│   └── behaviour_log.py    #   SQLite events log + command queue + patterns
+│   └── behaviour_log.py    #   SQLite schema: events, intents, state, commands
+├── data/
+│   └── synthetic_events.db #   4 weeks of fake user behaviour for testing
 ├── events.db              # runtime DB (generated; git-ignored)
 ├── requirements.txt
 └── CLAUDE.md
@@ -89,12 +92,36 @@ The two entry points stay at the root so you run them the same way
 | `system/behaviour_log.py` | SQLite: `events` log + `commands` queue + patterns | no |
 | `events.db` | SQLite database (generated at runtime; not in git) | — |
 
-### Database (`events.db`)
+### Database (`events.db`, Phase 6 schema)
 
-- **`events`** — every command, hardware action, and presence change, with
-  timestamp / weekday / hour. This is the raw material for behaviour learning.
-- **`commands`** — the agent→controller queue (`pending` → `done`).
-- WAL mode is on so both processes can use the DB at once.
+- **`events`**: every command, hardware action, presence change (and Phase 7
+  feedback). Each row has `day_type` (weekday/weekend), `slot` (6-slot day:
+  late 0-4, early 5-8, morning 9-11, midday 12-16, evening 17-20, night 21-23),
+  `source` (user/pir/auto), the user's `utterance`, `before_state`/`after_state`,
+  `parent_id` (action → the command that caused it) and `intent_id`.
+- **`intents`**: categories for *why* the user did something. Seeded with
+  cooling, reduce_airflow, ambience, sleep_prep, arrival, leaving. Qwen may add
+  new ones in `update_intents.py`, but must reuse existing ones when they fit.
+- **`state`**: one row with the current fan + LED state. The controller writes
+  it; the agent reads it to log `before_state`.
+- **`commands`**: the agent→controller queue (`pending` → `done`), with
+  `parent_id` linking back to the user's command row.
+- Learning uses **only `source='user'` rows**, so PIR defaults and future
+  auto-actions never count as the user's habits.
+- WAL mode is on so both processes can use the DB at once. An old pre-Phase-6
+  `events.db` is rejected at startup; delete it.
+
+### Labeling intents
+
+```bash
+python update_intents.py
+```
+
+Labels user commands that have no intent yet. Identical commands in the same
+slot go to Qwen once. Roughly 6-9 s per unique command on the Pi; the
+synthetic DB has 52 unique commands (~5-8 min).
+
+To test with synthetic data: `cp data/synthetic_events.db events.db`.
 
 ---
 
@@ -151,8 +178,8 @@ git checkout main           # return to latest
 | 2 | Control hardware with Python | ✅ Done | `phase-2` | `fan_control.py`, `led_control.py` |
 | 3 | Qwen controls the hardware | ✅ Done | `phase-3` | + `agent.py`, `behaviour_log.py` (agent calls GPIO directly) |
 | 4 | Detect user → auto-start fan+LED (rule-based) | ✅ Done | `phase-4` | + `controller.py`, `tool_schemas.py`, command-queue refactor |
-| 5 | Voice commands | ⏳ Planned | `phase-5` | STT via **API (Cartesia)**; optional wake-word |
-| 6 | Store user behaviour | ⏳ Planned | `phase-6` | extends `behaviour_log.py` (foundation already logging) |
+| 5 | Voice commands | ⏸ Parked (no mic) | `phase-5` | Deepgram STT (cloud), push-to-talk; needs a USB mic |
+| 6 | Store user behaviour | 🔧 In progress (branch `phase-6`) | `phase-6` | new schema, `update_intents.py`, `data/synthetic_events.db` |
 | 7 | Learn patterns → act with permission | ⏳ Planned | `phase-7` | pattern analysis + proactive suggestions gated on user consent |
 | 8 | Try Hermes Agent (optional) | ⏳ Planned | `phase-8` | wrap tools as MCP; Hermes owns the loop |
 
