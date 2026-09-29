@@ -99,9 +99,12 @@ def main():
           f"Batches of {BATCH_SIZE}.")
     start = time.monotonic()
     labeled = 0
+    total_batches = (len(uniques) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for b in range(0, len(uniques), BATCH_SIZE):
         batch = uniques[b:b + BATCH_SIZE]
+        batch_no = b // BATCH_SIZE + 1
+        print(f"\n[batch {batch_no}/{total_batches}] sending {len(batch)} commands to Qwen...")
         intents = list_intents()
         t0 = time.monotonic()
 
@@ -135,7 +138,12 @@ def main():
             labeled += len(ids_for[id(item)])
             print(f'  "{item["utterance"]}" ({item["day_type"]} {item["slot"]}) -> {name}')
 
-        print(f"  batch {b // BATCH_SIZE + 1} done in {time.monotonic() - t0:.0f}s")
+        done = min(b + BATCH_SIZE, len(uniques))
+        elapsed = time.monotonic() - start
+        eta = elapsed / done * (len(uniques) - done)
+        print(f"  batch {batch_no} done in {time.monotonic() - t0:.0f}s | "
+              f"progress {done}/{len(uniques)} unique ({done * 100 // len(uniques)}%) | "
+              f"{labeled}/{len(cmds)} commands labeled | ETA ~{eta / 60:.1f} min")
 
     print(f"\nLabeled {labeled}/{len(cmds)} commands in {time.monotonic() - start:.0f}s.")
     left = len(uncategorized_commands())
