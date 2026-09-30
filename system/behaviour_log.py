@@ -2,7 +2,7 @@
 SQLite behaviour store for the home-automation agent (Phase 6 schema).
 
 Tables in events.db (project root):
-  events    every command, hardware action, presence change (+ Phase 7 feedback)
+  events    every command, action, presence change, suggestion, feedback
   intents   category list ("why" the user did something); seeded, Qwen may add
   state     one row: current fan + LED state (written by controller.py)
   commands  agent -> controller queue
@@ -127,6 +127,7 @@ def init_db():
                 fan_on      INTEGER NOT NULL,
                 fan_speed   INTEGER NOT NULL,
                 led         TEXT    NOT NULL,
+                present     INTEGER NOT NULL DEFAULT 0,   -- someone in the room (PIR)
                 updated_at  TEXT    NOT NULL
             )
             """
@@ -144,11 +145,21 @@ def init_db():
                 ts         TEXT    NOT NULL,
                 name       TEXT    NOT NULL,   -- set_fan | set_led
                 args       TEXT    NOT NULL,   -- JSON args
-                parent_id  INTEGER,            -- the user's command event
+                parent_id  INTEGER,            -- the event that caused it
+                source     TEXT    NOT NULL DEFAULT 'user',    -- user | auto
                 status     TEXT    NOT NULL DEFAULT 'pending'  -- pending|done
             )
             """
         )
+
+        # Upgrade a Phase 6 database in place (keeps existing rows + intents).
+        for table, col, ddl in (
+            ("state", "present", "INTEGER NOT NULL DEFAULT 0"),
+            ("commands", "source", "TEXT NOT NULL DEFAULT 'user'"),
+        ):
+            have = [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]
+            if col not in have:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
 
 # --- Events ------------------------------------------------------------------
@@ -198,9 +209,18 @@ def log_presence(state: str) -> int:
 # --- Current room state ------------------------------------------------------
 
 def get_state() -> dict:
+    """Current room state. Includes 'present' (someone in the room)."""
     with _conn() as c:
-        r = c.execute("SELECT fan_on, fan_speed, led FROM state WHERE id=1").fetchone()
-    return {"fan_on": bool(r["fan_on"]), "fan_speed": r["fan_speed"], "led": r["led"]}
+        r = c.execute("SELECT fan_on, fan_speed, led, present FROM state WHERE id=1").fetchone()
+    return {"fan_on": bool(r["fan_on"]), "fan_speed": r["fan_speed"], "led": r["led"],
+            "present": bool(r["present"])}
+
+
+def set_presence(present: bool):
+    """Controller side: record whether someone is in the room."""
+    with _conn() as c:
+        c.execute("UPDATE state SET present=?, updated_at=? WHERE id=1",
+                  (int(present), datetime.now().isoformat(timespec="seconds")))
 
 
 def set_state(fan_on: bool, fan_speed: int, led: str):
@@ -213,20 +233,21 @@ def set_state(fan_on: bool, fan_speed: int, led: str):
 
 # --- Command queue (agent -> controller) -------------------------------------
 
-def enqueue_command(name: str, args: dict, parent_id: int = None):
+def enqueue_command(name: str, args: dict, parent_id: int = None, source: str = "user"):
+    """Queue a hardware change. source='auto' for pattern-driven actions."""
     with _conn() as c:
         c.execute(
-            "INSERT INTO commands (ts, name, args, parent_id, status)"
-            " VALUES (?, ?, ?, ?, 'pending')",
+            "INSERT INTO commands (ts, name, args, parent_id, source, status)"
+            " VALUES (?, ?, ?, ?, ?, 'pending')",
             (datetime.now().isoformat(timespec="seconds"), name,
-             json.dumps(args), parent_id),
+             json.dumps(args), parent_id, source),
         )
 
 
 def fetch_pending_commands() -> list:
     with _conn() as c:
         rows = c.execute(
-            "SELECT id, name, args, parent_id FROM commands"
+            "SELECT id, name, args, parent_id, source FROM commands"
             " WHERE status='pending' ORDER BY id"
         ).fetchall()
     return [dict(r) for r in rows]
@@ -295,24 +316,3 @@ def set_intent(event_ids: list, intent_id: int):
         for eid in event_ids:
             c.execute("UPDATE events SET intent_id=? WHERE id=? OR parent_id=?",
                       (intent_id, eid, eid))
-
-
-# --- Prompt summary (placeholder until Phase 7 builds patterns.txt) ----------
-
-def summarise_patterns() -> str:
-    """Short summary of the user's most common intents per slot."""
-    with _conn() as c:
-        rows = c.execute(
-            """
-            SELECT e.day_type, e.slot, i.name, COUNT(*) AS n
-            FROM events e JOIN intents i ON i.id = e.intent_id
-            WHERE e.kind='command' AND e.source='user'
-            GROUP BY e.day_type, e.slot, i.name
-            HAVING n >= 3
-            ORDER BY n DESC
-            LIMIT 5
-            """
-        ).fetchall()
-    if not rows:
-        return "No learned habits yet."
-    return "; ".join(f"{r['day_type']} {r['slot']}: {r['name']} ({r['n']}x)" for r in rows)

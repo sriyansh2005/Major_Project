@@ -35,7 +35,7 @@ share **GND only**; never feed battery voltage into a Pi pin. LED is common-anod
 
 ---
 
-## 3. Software Architecture (current — Phase 4)
+## 3. Software Architecture (current: Phase 7)
 
 Two processes run in parallel. **Only `controller.py` touches the GPIO** (pins
 can have a single owner); the agent sends requests through a shared SQLite queue.
@@ -56,6 +56,10 @@ can have a single owner); the agent sends requests through a shared SQLite queue
 - **Priority:** an agent command sets `manual_override` for that visit, so the
   PIR will not overwrite your chosen colour/speed. The override clears when you
   leave (away-timeout).
+- **Habit path (Phase 7):** a checker thread in `agent.py` reads `patterns.json`
+  every 30 s. When a habit is due and someone is in the room, it asks in the
+  chat (or, for trusted habits, does it and says so). Your reply is logged as
+  feedback and updates that habit.
 
 ### Repository layout
 
@@ -67,12 +71,17 @@ Major-project/
 │   ├── fan_control.py      #   set_fan / get_fan  (L298N PWM)
 │   └── led_control.py      #   set_led / get_led  (digital RGB)
 ├── update_intents.py      # run by hand: Qwen labels commands with intents (Phase 6)
+├── update_patterns.py     # run by hand: builds patterns.json + patterns.txt (Phase 7)
+├── learn.py               # runs update_intents.py then update_patterns.py
 ├── system/                # brain + storage (GPIO-free)
 │   ├── tool_schemas.py     #   LLM tool definitions
-│   └── behaviour_log.py    #   SQLite schema: events, intents, state, commands
+│   ├── behaviour_log.py    #   SQLite schema: events, intents, state, commands
+│   └── patterns.py         #   habit statistics, patterns.json I/O, ask/auto rules
 ├── data/
 │   └── synthetic_events.db #   4 weeks of fake user behaviour for testing
 ├── events.db              # runtime DB (generated; git-ignored)
+├── patterns.json          # learned habits for code (generated; git-ignored)
+├── patterns.txt           # learned habits in English for Qwen (generated; git-ignored)
 ├── requirements.txt
 └── CLAUDE.md
 ```
@@ -122,6 +131,36 @@ slot go to Qwen once. Roughly 6-9 s per unique command on the Pi; the
 synthetic DB has 52 unique commands (~5-8 min).
 
 To test with synthetic data: `cp data/synthetic_events.db events.db`.
+
+### Learning habits (Phase 7)
+
+```bash
+python learn.py        # = update_intents.py, then update_patterns.py
+```
+
+Then restart `agent.py`. `update_patterns.py`:
+1. Groups labeled **user** commands by weekday/weekend + slot + intent.
+2. Confidence = share of matching days the habit happened; last 21 days count double.
+3. Keeps a habit only if seen ≥ 3 times and confidence ≥ 0.6; max 3 per slot.
+4. Stores the usual time (median) and usual actions (most common LED colour,
+   median fan speed).
+5. Writes `patterns.json`, carrying over `approvals`, `rejections`,
+   `disabled`, `last_fired` from the previous file.
+6. Asks Qwen to write `patterns.txt` (plain-English profile for the prompt);
+   falls back to a plain list if Ollama is down.
+
+### How the agent uses habits
+
+- Fires a habit from 5 min before to 60 min after its usual time, once per
+  day, only when someone is present, one suggestion at a time (expires after
+  10 min unanswered).
+- **Auto-execute** only if confidence ≥ 0.9 AND seen ≥ 5 times AND approved
+  ≥ 3 times. Otherwise it asks. Qwen can never promote ask → auto by itself.
+- Your reply: **yes** → done as `source=auto`, approvals +1. **no** →
+  rejections +1. **something else** ("no, make it red") → does that, logs it as
+  your own command (so it's learned next time), rejections +1. **never / don't
+  ask** → habit disabled. Habits are muted when rejections − approvals ≥ 3.
+- Tunables live at the top of `system/patterns.py` and `agent.py`.
 
 ---
 
@@ -179,8 +218,8 @@ git checkout main           # return to latest
 | 3 | Qwen controls the hardware | ✅ Done | `phase-3` | + `agent.py`, `behaviour_log.py` (agent calls GPIO directly) |
 | 4 | Detect user → auto-start fan+LED (rule-based) | ✅ Done | `phase-4` | + `controller.py`, `tool_schemas.py`, command-queue refactor |
 | 5 | Voice commands | ⏸ Parked (no mic) | `phase-5` | Deepgram STT (cloud), push-to-talk; needs a USB mic |
-| 6 | Store user behaviour | 🔧 In progress (branch `phase-6`) | `phase-6` | new schema, `update_intents.py`, `data/synthetic_events.db` |
-| 7 | Learn patterns → act with permission | ⏳ Planned | `phase-7` | pattern analysis + proactive suggestions gated on user consent |
+| 6 | Store user behaviour | 🧪 Built, testing on Pi (branch `phase-6`) | `phase-6` | new schema, `update_intents.py`, `data/synthetic_events.db` |
+| 7 | Learn patterns → act with permission | 🧪 Built, testing on Pi (branch `phase-7`) | `phase-7` | `system/patterns.py`, `update_patterns.py`, `learn.py`, checker in `agent.py` |
 | 8 | Try Hermes Agent (optional) | ⏳ Planned | `phase-8` | wrap tools as MCP; Hermes owns the loop |
 
 > Note: phases 1–4 were built before git existed, so `phase-4` is the first real
@@ -212,4 +251,7 @@ git checkout main           # return to latest
 - Auto-off uses a fixed `AWAY_SECONDS` timeout (60 s). If it turns off while you
   sit still, raise it in `controller.py`.
 - LED is digital (no true orange; yellow is the presence default).
-- Phase 5 STT tech (Cartesia API vs on-device) and wake-word to be finalised.
+- Phase 5 voice is parked until a USB mic is connected.
+- While a suggestion is waiting, your next message is read as the answer to it.
+- Weekday/weekend split can hide one-day habits (e.g. Sunday-only bedtime).
+- Intent for the fan is guessed from time only; a temperature sensor would help.

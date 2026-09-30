@@ -26,6 +26,7 @@ from system.behaviour_log import (
     init_db,
     log_action,
     log_presence,
+    set_presence,
     set_state,
     fetch_pending_commands,
     mark_command_done,
@@ -80,8 +81,8 @@ def apply_pending_commands():
     for cmd in fetch_pending_commands():
         name, args = cmd["name"], json.loads(cmd["args"])
         if name in DISPATCH:
-            after = do(name, args, "user", cmd["parent_id"])
-            print(f"  [agent cmd] {name}({args}) -> {after}")
+            after = do(name, args, cmd["source"], cmd["parent_id"])
+            print(f"  [{cmd['source']} cmd] {name}({args}) -> {after}")
             applied += 1
         mark_command_done(cmd["id"])
     return applied
@@ -91,6 +92,7 @@ def main():
     init_db()
     s = snapshot()                       # publish the real starting state
     set_state(s["fan_on"], s["fan_speed"], s["led"])
+    set_presence(False)
     cleared = flush_pending_commands()   # drop stale commands from last run
     if cleared:
         print(f"Cleared {cleared} stale queued command(s).")
@@ -141,6 +143,7 @@ def main():
                     do("set_fan", {"on": True, "speed": AUTO_FAN_SPEED}, "pir")
                     do("set_led", {"color": AUTO_LED_COLOR}, "pir")
                 log_presence("present")
+                set_presence(True)
 
             # 3b) EXIT: no motion for a long time -> person left, turn all off.
             elif present and away_for is not None and away_for > AWAY_SECONDS:
@@ -148,6 +151,7 @@ def main():
                 do("set_fan", {"on": False}, "pir")
                 do("set_led", {"color": "off"}, "pir")
                 log_presence("absent")
+                set_presence(False)
                 present = False
                 manual_override = False
                 motion_since = None

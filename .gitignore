@@ -9,6 +9,11 @@ events.db
 events.db-wal
 events.db-shm
 
+# Learned per device (patterns.json holds your yes/no answers)
+patterns.json
+patterns.json.tmp
+patterns.txt
+
 # Logs
 *.log
 motion_log.txt

@@ -1,103 +1,264 @@
 """
-Minimal agent loop: natural language -> Qwen (via Ollama) -> tool call -> hardware.
+Agent: natural language -> Qwen (via Ollama) -> queued hardware commands,
+plus proactive suggestions from learned habits (Phase 7).
 
-Run Ollama on the Pi first:
-    ollama serve                 # usually already running as a service
-    ollama pull qwen2.5:3b       # one-time model download
+    python agent.py                      # chat (with habit suggestions)
+    python agent.py "fan to 50"          # one-shot command, no suggestions
 
-Then:
-    python agent.py "turn on the fan at half speed"
-    python agent.py              # interactive REPL
-
-This talks to Ollama's OpenAI-compatible endpoint and uses native tool calling.
+What it knows about you comes from patterns.txt (loaded into the prompt).
+A background checker reads patterns.json every CHECK_EVERY seconds; when one
+of your habits is due and someone is in the room, it either asks you in the
+chat or, for habits you've approved enough times, does it and tells you.
 """
 
 import json
 import sys
+import threading
+import time
+from datetime import datetime
 
 import requests
 
+from system import patterns as pt
 from system.tool_schemas import TOOLS
 from system.behaviour_log import (
     init_db,
     enqueue_command,
     get_state,
     log_command,
-    summarise_patterns,
+    log_event,
 )
 
 # --- Config ------------------------------------------------------------------
 OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 MODEL = "qwen2.5:3b"
+CHECK_EVERY = 30          # seconds between habit checks
+PENDING_TTL = 10 * 60     # an unanswered suggestion expires after 10 min
+MAX_HISTORY = 12          # chat turns kept in the prompt (keeps Qwen fast)
 
-# The agent does NOT touch GPIO. Each tool call is queued in the DB and the
-# controller process applies it to the hardware (and logs the action, linked
-# to the user's command row via parent_id).
+# The agent does NOT touch GPIO. Tool calls are queued in the DB and the
+# controller applies them (and logs the action linked via parent_id).
 TOOL_NAMES = {"set_fan", "set_led"}
 
 SYSTEM_PROMPT = (
-    "You control home devices on a Raspberry Pi: a fan and an RGB LED. "
+    "You are a home assistant on a Raspberry Pi controlling a fan and an RGB LED. "
     "Use set_fan to change the fan (speed 0-100; 'half'=50, 'low'~30, 'high'=100). "
-    "Use set_led to change the LED colour (red, green, blue, yellow, "
-    "cyan, purple, white, off). "
-    "Only call a tool when hardware action is needed; otherwise reply briefly."
+    "Use set_led to change the LED colour (red, green, blue, yellow, cyan, "
+    "purple, white, off). Only call a tool when hardware action is needed; "
+    "otherwise reply in one or two friendly sentences. Use what you know about "
+    "the user's habits to understand vague requests."
 )
 
+ANSWER_RULES = (
+    "You just suggested this to the user: \"{question}\" "
+    "(suggested actions: {actions}). Read their reply.\n"
+    "- If they agree, call the tools for exactly the suggested actions.\n"
+    "- If they want something different, call the tools for what they want.\n"
+    "- If they decline, call no tools and reply in one short sentence."
+)
 
-def ask_qwen(messages: list) -> dict:
-    """Send the conversation + tools to Ollama, return the assistant message."""
-    resp = requests.post(
-        OLLAMA_URL,
-        json={"model": MODEL, "messages": messages, "tools": TOOLS},
-        timeout=120,  # Pi 4B inference is slow; give it room
-    )
+lock = threading.Lock()
+pending = None            # the suggestion waiting for an answer
+
+
+# --- Qwen --------------------------------------------------------------------
+
+def build_system_prompt() -> str:
+    return f"{SYSTEM_PROMPT}\n\nWhat you know about this user:\n{pt.load_profile()}"
+
+
+def ask_qwen(messages: list, tools: bool = True) -> dict:
+    payload = {"model": MODEL, "messages": messages}
+    if tools:
+        payload["tools"] = TOOLS
+    resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]
 
 
-def handle(user_text: str, history: list) -> str:
-    """One turn: send user text, run any tool the model requests, return a reply."""
-    # Log the user's words + the room state before anything changes.
-    cmd_id = log_command(user_text, get_state())
-    history.append({"role": "user", "content": user_text})
-    msg = ask_qwen(history)
-    history.append(msg)
-
-    tool_calls = msg.get("tool_calls") or []
-    if not tool_calls:
-        return msg.get("content", "") or "(no reply)"
-
-    # Queue each tool call, linked to the command row. No second Qwen call:
-    # on the Pi that doubles the wait.
-    done = []
-    for call in tool_calls:
+def tool_calls(msg: dict) -> list:
+    """[(name, args), ...] from a Qwen reply, ignoring unknown tools."""
+    calls = []
+    for call in msg.get("tool_calls") or []:
         name = call["function"]["name"]
         args = call["function"]["arguments"]
         args = json.loads(args) if isinstance(args, str) else (args or {})
-        if name not in TOOL_NAMES:
-            print(f"  [tool] unknown tool {name}, skipped")
-            continue
-        enqueue_command(name, args, parent_id=cmd_id)
-        print(f"  [tool] {name}({args}) queued")
+        if name in TOOL_NAMES:
+            calls.append((name, args))
+    return calls
+
+
+def queue(calls: list, parent_id: int, source: str) -> list:
+    done = []
+    for name, args in calls:
+        enqueue_command(name, args, parent_id=parent_id, source=source)
+        print(f"  [{source}] {name}({args}) queued")
         done.append(f"{name} {args}")
+    return done
 
-    return "Queued: " + "; ".join(done) if done else "(nothing to do)"
+
+def trim(history: list):
+    """Keep the system prompt + the last MAX_HISTORY messages."""
+    if len(history) > MAX_HISTORY + 1:
+        del history[1:len(history) - MAX_HISTORY]
 
 
-def build_system_prompt() -> str:
-    """System prompt enriched with what we've learned about the user."""
-    return f"{SYSTEM_PROMPT}\n\nLearned behaviour: {summarise_patterns()}"
+# --- Normal commands ---------------------------------------------------------
 
+def handle(user_text: str, history: list) -> str:
+    """One turn: log the user's words, let Qwen pick tools, queue them."""
+    cmd_id = log_command(user_text, get_state())
+    history.append({"role": "user", "content": user_text})
+    trim(history)
+    msg = ask_qwen(history)
+    history.append({"role": "assistant", "content": msg.get("content") or ""})
+
+    calls = tool_calls(msg)
+    if not calls:
+        return msg.get("content") or "(no reply)"
+    return "Queued: " + "; ".join(queue(calls, cmd_id, "user"))
+
+
+# --- Proactive suggestions ---------------------------------------------------
+
+def phrase_question(p: dict) -> str:
+    """Let Qwen word the suggestion like a chat; fall back to a template."""
+    fallback = (f"It's around {p['typical_time']}, when you usually go for "
+                f"{p['intent'].replace('_', ' ')}. Want me to set {pt.describe_actions(p['actions'])}?")
+    try:
+        msg = ask_qwen([
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": (
+                "Write ONE short, friendly question offering to do this for the user "
+                f"now: {pt.describe_actions(p['actions'])}. Reason: it's {p['day_type']} "
+                f"{p['slot']} and they usually do this around {p['typical_time']} "
+                f"({p['intent'].replace('_', ' ')}). Only the question.")},
+        ], tools=False)
+        text = (msg.get("content") or "").strip().strip('"')
+        return text if 0 < len(text) < 200 else fallback
+    except requests.RequestException:
+        return fallback
+
+
+def tick(now: datetime):
+    """Fire at most one due habit: ask about it, or do it if it's trusted."""
+    global pending
+    with lock:
+        if pending and time.monotonic() - pending["at"] > PENDING_TTL:
+            pending = None                      # expired, nobody answered
+        if pending:
+            return
+
+    if not get_state()["present"]:
+        return                                  # nobody here to ask
+    due = pt.due_patterns(pt.load_patterns(), now)
+    if not due:
+        return
+    p = due[0]
+    pt.update_pattern(p["id"], last_fired=now.date().isoformat())
+
+    if pt.can_auto(p):
+        eid = log_event("suggestion", "auto", utterance=f"auto: {p['id']}",
+                        args={"pattern": p["id"], "mode": "auto"})
+        queue([(a["tool"], a["args"]) for a in p["actions"]], eid, "auto")
+        print(f"\n[auto] Set {pt.describe_actions(p['actions'])}, like you usually do "
+              f"around {p['typical_time']}. Just tell me if you want something else.\n> ",
+              end="", flush=True)
+        return
+
+    question = phrase_question(p)
+    eid = log_event("suggestion", "auto", utterance=question,
+                    args={"pattern": p["id"], "mode": "ask"})
+    with lock:
+        pending = {"pattern": p, "question": question, "event_id": eid, "at": time.monotonic()}
+    print(f"\n[suggestion] {question}\n> ", end="", flush=True)
+
+
+def same_actions(calls: list, actions: list) -> bool:
+    """Did Qwen do what was suggested? (fan speed within 10% counts as same)"""
+    got = {name: args for name, args in calls}
+    want = {a["tool"]: a["args"] for a in actions}
+    if set(got) != set(want):
+        return False
+    for tool, w in want.items():
+        g = got[tool]
+        if tool == "set_led" and g.get("color") != w.get("color"):
+            return False
+        if tool == "set_fan":
+            if bool(g.get("on", True)) != bool(w.get("on", True)):
+                return False
+            if w.get("on") and abs(g.get("speed", 100) - w.get("speed", 100)) > 10:
+                return False
+    return True
+
+
+def answer_suggestion(reply: str, sug: dict, history: list) -> str:
+    """Treat the user's reply as an answer: approve, decline, correct, or mute."""
+    p = sug["pattern"]
+    history += [{"role": "assistant", "content": sug["question"]},
+                {"role": "user", "content": reply}]
+    trim(history)
+
+    def feedback(verdict):
+        log_event("feedback", "user", utterance=reply, parent_id=sug["event_id"],
+                  args={"pattern": p["id"], "verdict": verdict})
+
+    if any(k in reply.lower() for k in ("never", "don't ask", "dont ask", "stop asking")):
+        pt.update_pattern(p["id"], disabled=True)
+        feedback("never")
+        return "Got it, I won't suggest that again."
+
+    msg = ask_qwen([
+        {"role": "system", "content": build_system_prompt() + "\n\n" + ANSWER_RULES.format(
+            question=sug["question"], actions=pt.describe_actions(p["actions"]))},
+        {"role": "user", "content": reply},
+    ])
+    calls = tool_calls(msg)
+    current = next((x for x in pt.load_patterns() if x["id"] == p["id"]), p)
+
+    if not calls:
+        pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
+        feedback("rejected")
+        return msg.get("content") or "Okay, leaving it as it is."
+
+    if same_actions(calls, p["actions"]):
+        # Approved: done as auto (it was the system's idea), counted as an approval.
+        pt.update_pattern(p["id"], approvals=current["approvals"] + 1)
+        feedback("approved")
+        return "Done: " + "; ".join(queue(calls, sug["event_id"], "auto"))
+
+    # Corrected: the user wanted something else. That IS the user's own choice,
+    # so it's logged as a user command and will be learned from next time.
+    pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
+    feedback("corrected")
+    cmd_id = log_command(reply, get_state())
+    return "Okay, instead: " + "; ".join(queue(calls, cmd_id, "user"))
+
+
+def checker(stop: threading.Event):
+    while not stop.wait(CHECK_EVERY):
+        try:
+            tick(datetime.now())
+        except Exception as e:                  # never let the checker die
+            print(f"\n[checker] error: {e}\n> ", end="", flush=True)
+
+
+# --- Main --------------------------------------------------------------------
 
 def main():
+    global pending
     init_db()
     history = [{"role": "system", "content": build_system_prompt()}]
 
-    if len(sys.argv) > 1:  # one-shot from the command line
+    if len(sys.argv) > 1:                       # one-shot, no suggestions
         print(handle(" ".join(sys.argv[1:]), history))
         return
 
-    print("Home assistance agent ready. Type a command ('quit' to exit).")
+    stop = threading.Event()
+    threading.Thread(target=checker, args=(stop,), daemon=True).start()
+    n = len(pt.load_patterns())
+    print(f"Home assistant ready ({n} learned habits). Type a command ('quit' to exit).")
+
     while True:
         try:
             text = input("> ").strip()
@@ -105,8 +266,15 @@ def main():
             break
         if text.lower() in {"quit", "exit"}:
             break
-        if text:
-            print(handle(text, history))
+        if not text:
+            continue
+        with lock:
+            sug, pending = pending, None
+        try:
+            print(answer_suggestion(text, sug, history) if sug else handle(text, history))
+        except requests.RequestException as e:
+            print(f"Qwen didn't answer ({e}). Is Ollama running?")
+    stop.set()
 
 
 if __name__ == "__main__":
