@@ -34,7 +34,9 @@ from system.behaviour_log import (
 OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 MODEL = "qwen2.5:3b"
 CHECK_EVERY = 30          # seconds between habit checks
-PENDING_TTL = 10 * 60     # an unanswered suggestion expires after 10 min
+REASK_MIN = 5             # ask again after a "no" / no answer (set to 20 after testing)
+MAX_ASKS = 3              # per habit per day
+PENDING_TTL = REASK_MIN * 60   # an unanswered suggestion expires before the re-ask
 MAX_HISTORY = 12          # chat turns kept in the prompt (keeps Qwen fast)
 
 # The agent does NOT touch GPIO. Tool calls are queued in the DB and the
@@ -169,13 +171,13 @@ def tick(now: datetime):
 
     if not get_state()["present"]:
         return                                  # nobody here to ask
-    due = pt.due_patterns(pt.load_patterns(), now)
+    due = pt.due_patterns(pt.load_patterns(), now, REASK_MIN, MAX_ASKS)
     if not due:
         return
     p = due[0]
-    pt.update_pattern(p["id"], last_fired=now.date().isoformat())
 
     if pt.can_auto(p):
+        pt.update_pattern(p["id"], done_date=now.date().isoformat())
         eid = log_event("suggestion", "auto", utterance=f"auto: {p['id']}",
                         args={"pattern": p["id"], "mode": "auto"})
         queue([(a["tool"], a["args"]) for a in p["actions"]], eid, "auto")
@@ -184,6 +186,7 @@ def tick(now: datetime):
               end="", flush=True)
         return
 
+    pt.record_ask(p, now)
     question = phrase_question(p)
     eid = log_event("suggestion", "auto", utterance=question,
                     args={"pattern": p["id"], "mode": "ask"})
@@ -227,17 +230,30 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
         return "Got it, I won't suggest that again."
 
     current = next((x for x in pt.load_patterns() if x["id"] == p["id"]), p)
+    today = now().date().isoformat()
+
+    def declined():
+        # Counted once per day: "not yet" at 17:05 isn't "I never want this".
+        if current.get("rejected_date") != today:
+            pt.update_pattern(p["id"], rejections=current["rejections"] + 1,
+                              rejected_date=today)
+
+    def accepted():
+        pt.update_pattern(p["id"], approvals=current["approvals"] + 1, done_date=today)
+
     plain = reply.lower().strip(" .!?,")
     suggested = [(a["tool"], a["args"]) for a in p["actions"]]
 
     if plain in YES:
-        pt.update_pattern(p["id"], approvals=current["approvals"] + 1)
+        accepted()
         feedback("approved")
         return "Done: " + "; ".join(queue(suggested, sug["event_id"], "auto"))
     if plain in NO:
-        pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
+        declined()
         feedback("rejected")
-        return "Okay, leaving it as it is."
+        if current.get("asks", 0) < MAX_ASKS:
+            return f"Okay, leaving it. I'll ask again in {REASK_MIN} min."
+        return "Okay, leaving it. I won't ask again today."
 
     # Anything else ("no, make it blue") -> let Qwen work out what they want.
     msg = ask_qwen([
@@ -248,19 +264,20 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
     calls = tool_calls(msg)
 
     if not calls:
-        pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
+        declined()
         feedback("rejected")
         return msg.get("content") or "Okay, leaving it as it is."
 
     if same_actions(calls, p["actions"]):
         # Approved: done as auto (it was the system's idea), counted as an approval.
-        pt.update_pattern(p["id"], approvals=current["approvals"] + 1)
+        accepted()
         feedback("approved")
         return "Done: " + "; ".join(queue(calls, sug["event_id"], "auto"))
 
     # Corrected: the user wanted something else. That IS the user's own choice,
     # so it's logged as a user command and will be learned from next time.
-    pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
+    declined()
+    pt.update_pattern(p["id"], done_date=today)      # they chose; stop asking today
     feedback("corrected")
     cmd_id = log_command(reply, get_state())
     return "Okay, instead: " + "; ".join(queue(calls, cmd_id, "user"))

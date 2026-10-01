@@ -21,7 +21,7 @@ Qwen's intent label is kept only for wording ("sleep_prep").
 
 Files (project root):
   patterns.json  habits for code, plus runtime fields the agent updates
-                 (approvals, rejections, disabled, last_fired).
+                 (approvals, rejections, disabled, and today's asks).
   patterns.txt   plain-English profile written by Qwen, loaded into the prompt.
 """
 
@@ -64,7 +64,14 @@ AUTO_MIN_COUNT = 5
 AUTO_MIN_APPROVALS = 3
 MUTE_AFTER = 3            # stop asking once rejections - approvals reaches this
 
-RUNTIME_FIELDS = {"approvals": 0, "rejections": 0, "disabled": False, "last_fired": None}
+RUNTIME_FIELDS = {
+    "approvals": 0, "rejections": 0, "disabled": False,
+    "ask_date": None,       # the day the counters below belong to
+    "asks": 0,              # questions asked on ask_date
+    "last_asked": None,     # when the last question was asked (system clock)
+    "done_date": None,      # day it was accepted / auto-run / corrected: stop asking
+    "rejected_date": None,  # day a "no" was already counted (max one per day)
+}
 SLOT_RANGE = {name: (lo * 60, hi * 60 + 59) for name, lo, hi in SLOTS}
 
 
@@ -248,7 +255,7 @@ def compute_patterns() -> list:
 
 
 def merge_runtime(new: list, old: list) -> list:
-    """Carry approvals / rejections / disabled / last_fired over from the old file."""
+    """Carry approvals / rejections / disabled / today's asks over from the old file."""
     old_by_id = {p["id"]: p for p in old}
     for p in new:
         prev = old_by_id.get(p["id"], {})
@@ -318,12 +325,33 @@ def habit_now(patterns: list, now: datetime):
     return next((p for p in patterns if not p["disabled"] and _valid_at(p, now)), None)
 
 
-def due_patterns(patterns: list, now: datetime) -> list:
-    """Habits that should be suggested right now, strongest first."""
+def due_patterns(patterns: list, now: datetime, reask_min: int = 20, max_asks: int = 3) -> list:
+    """Habits that should be suggested right now, strongest first.
+
+    A habit is asked at most `max_asks` times a day, at least `reask_min`
+    minutes apart, and not again once it was done or corrected that day.
+    """
     today = now.date().isoformat()
-    due = [p for p in patterns
-           if _valid_at(p, now) and not is_muted(p) and p["last_fired"] != today]
+    due = []
+    for p in patterns:
+        if not _valid_at(p, now) or is_muted(p) or p.get("done_date") == today:
+            continue
+        if p.get("ask_date") == today:
+            if p.get("asks", 0) >= max_asks:
+                continue
+            last = datetime.fromisoformat(p["last_asked"])
+            if now - last < timedelta(minutes=reask_min):
+                continue
+        due.append(p)
     return sorted(due, key=lambda p: -p["confidence"])
+
+
+def record_ask(p: dict, now: datetime):
+    """Note that `p` was just asked about."""
+    today = now.date().isoformat()
+    asks = p.get("asks", 0) + 1 if p.get("ask_date") == today else 1
+    update_pattern(p["id"], ask_date=today, asks=asks,
+                   last_asked=now.isoformat(timespec="seconds"))
 
 
 def next_habit(patterns: list, now: datetime):

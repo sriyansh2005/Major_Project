@@ -164,8 +164,11 @@ Tunables (floors, fan gap, colour families) are at the top of `system/patterns.p
 - Every message to Qwen starts with the current time, room state, the habit
   for right now and the next habit, so "do it as usual" works and Qwen never
   invents a habit.
-- Suggests a habit anywhere inside its window, once per day, only when someone
-  is present, one suggestion at a time (expires after 10 min unanswered).
+- Suggests a habit anywhere inside its window, only when someone is present,
+  one suggestion at a time. After "no" or no answer it asks again after
+  `REASK_MIN` (5 min for testing, set 20 for real use), at most `MAX_ASKS` (3)
+  times a day. "yes" or a correction stops it for the day. Several "no"s on one
+  day count as one rejection.
 - Plain "yes/yeah/ok/sure" and "no/nah/not now" are handled without Qwen.
 - **Auto-execute** only if confidence ≥ 0.9 AND seen ≥ 5 times AND approved
   ≥ 3 times. Otherwise it asks. Qwen can never promote ask → auto by itself.
@@ -202,14 +205,22 @@ source ~/major/venv/bin/activate && python agent.py
 
 ### Simulating a date/time (testing)
 
-```bash
-python controller.py --time "2026-09-30 23:00"
+`python controller.py` asks for a date/time when it starts:
+
+```
+Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00", Enter = real time):
 ```
 
-The clock starts at that date/time and runs on in real time. It's stored in
-`events.db` (`state.sim_offset`), so `agent.py`'s habit checker and all event
-logging use the same simulated time. Start `agent.py` normally. Running
-`controller.py` without `--time` switches back to the real clock.
+- Press **Enter** for the real clock (normal use).
+- `sat 23:00` means the **next** Saturday from the current clock; use a full
+  date for an exact day.
+- While it runs, type **`next`** to jump to a new date/time, **`time`** to see
+  the clock. The clock keeps ticking from whatever you entered.
+- `python controller.py --time "2026-10-03 23:00"` skips the first prompt.
+
+The clock is stored in `events.db` (`state.sim_offset`), so `agent.py`'s habit
+checker and all event logging use the same simulated time. Start `agent.py`
+normally.
 
 `controller.py` has a 30 s PIR warm-up. `DEBUG = True` in it prints
 `raw / filtered / held / active / present` so you can watch presence build to 5 s;

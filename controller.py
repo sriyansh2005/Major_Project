@@ -16,7 +16,9 @@ and there is no GPIO conflict.
 
 import argparse
 import json
-from datetime import datetime
+import sys
+import threading
+from datetime import datetime, timedelta
 from collections import deque
 from time import sleep, monotonic
 
@@ -30,6 +32,7 @@ from system.behaviour_log import (
     log_presence,
     set_presence,
     set_sim_time,
+    now,
     set_state,
     fetch_pending_commands,
     mark_command_done,
@@ -91,19 +94,81 @@ def apply_pending_commands():
     return applied
 
 
+# --- Simulated clock (testing) -----------------------------------------------
+WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+TIME_PROMPT = ('Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00", '
+               'Enter = real time): ')
+
+
+def parse_when(text: str, ref: datetime):
+    """'2026-10-03 23:00' or 'sat 23:00' (next such day from ref) -> datetime.
+    Empty / 'real' -> None (use the real clock)."""
+    text = text.strip().lower()
+    if text in ("", "real"):
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M")
+    except ValueError:
+        pass
+    day, _, hm = text.partition(" ")
+    if day[:3] not in WEEKDAYS or not hm:
+        raise ValueError(text)
+    t = datetime.strptime(hm.strip(), "%H:%M")
+    ahead = (WEEKDAYS[day[:3]] - ref.weekday()) % 7
+    return (ref + timedelta(days=ahead)).replace(hour=t.hour, minute=t.minute,
+                                                 second=0, microsecond=0)
+
+
+def set_clock(text: str) -> bool:
+    """Apply a typed date/time. Returns False if it couldn't be understood."""
+    try:
+        start = parse_when(text, now())
+    except ValueError:
+        print("  Didn't understand that. Use 2026-10-03 23:00 or sat 23:00.")
+        return False
+    set_sim_time(start)
+    print(f"SIMULATED CLOCK: {start:%A %Y-%m-%d %H:%M}" if start
+          else "REAL CLOCK: " + datetime.now().strftime("%A %Y-%m-%d %H:%M"))
+    return True
+
+
+def ask_clock():
+    while not set_clock(input(TIME_PROMPT)):
+        pass
+
+
+def console():
+    """While running: 'next' = new date/time, 'time' = show the clock."""
+    for line in sys.stdin:
+        cmd = line.strip().lower()
+        if cmd == "next":
+            ask_clock()
+        elif cmd == "time":
+            print(f"Clock: {now():%A %Y-%m-%d %H:%M}")
+        elif cmd:
+            print("  Commands: next (new date/time), time (show clock).")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Hardware controller.")
     ap.add_argument("--time", metavar='"YYYY-MM-DD HH:MM"',
                     help="simulate this date/time for testing; the clock runs on from it")
+    ap.add_argument("--interactive", action="store_true", help=argparse.SUPPRESS)
     opts = ap.parse_args()
 
     init_db()
+    set_sim_time(None)
+    interactive = sys.stdin.isatty() or opts.interactive
     if opts.time:
-        start = datetime.strptime(opts.time, "%Y-%m-%d %H:%M")
-        set_sim_time(start)
-        print(f"SIMULATED CLOCK: starting at {start:%A %Y-%m-%d %H:%M}")
+        if not set_clock(opts.time):
+            sys.exit(1)
+    elif interactive:
+        ask_clock()                      # Enter = real time
     else:
-        set_sim_time(None)               # real time
+        print("REAL CLOCK (no terminal attached)")
+    if interactive:
+        print("Type 'next' any time to change the date/time, 'time' to see it.")
+        threading.Thread(target=console, daemon=True).start()
     s = snapshot()                       # publish the real starting state
     set_state(s["fan_on"], s["fan_speed"], s["led"])
     set_presence(False)
