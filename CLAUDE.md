@@ -139,21 +139,34 @@ python learn.py        # = update_intents.py, then update_patterns.py
 ```
 
 Then restart `agent.py`. `update_patterns.py`:
-1. Groups labeled **user** commands by weekday/weekend + slot + intent.
-2. Confidence = share of matching days the habit happened; last 21 days count double.
-3. Keeps a habit only if seen ≥ 3 times and confidence ≥ 0.6; max 3 per slot.
-4. Stores the usual time (median) and usual actions (most common LED colour,
-   median fan speed).
-5. Writes `patterns.json`, carrying over `approvals`, `rejections`,
-   `disabled`, `last_fired` from the previous file.
-6. Asks Qwen to write `patterns.txt` (plain-English profile for the prompt);
-   falls back to a plain list if Ollama is down.
+1. Takes every **user** command and what it did to each device. Commands
+   followed by the PIR reporting the room empty within 10 min are skipped
+   (that's leaving; the PIR already turns everything off).
+2. Per weekday/weekend + slot + device, groups **similar results**, not Qwen's
+   labels: fan = off, or speeds close together (30/40/50 = one group); LED =
+   colour family (`calm` blue/purple/cyan/magenta, `bright` white/yellow,
+   `vivid` red/green, `off`). A wrong Qwen label can't split a habit.
+3. Keeps a group if it happened ≥ 3 times on ≥ 60% of matching days (last 21
+   days count double).
+4. Merges device groups in the same slot within 30 min into one habit
+   ("light off + fan 30%"); max 3 habits per slot. Qwen's most common label
+   names it (e.g. sleep_prep).
+5. Each habit is valid for its **whole slot**; two habits in one slot split it
+   at the midpoint of their usual times.
+6. Writes `patterns.json` (carrying over `approvals`, `rejections`,
+   `disabled`, `last_fired`) and asks Qwen for `patterns.txt`, a short
+   description of the routine and the reasons; falls back to a plain list.
+
+Tunables (floors, fan gap, colour families) are at the top of `system/patterns.py`.
 
 ### How the agent uses habits
 
-- Fires a habit from 5 min before to 60 min after its usual time, once per
-  day, only when someone is present, one suggestion at a time (expires after
-  10 min unanswered).
+- Every message to Qwen starts with the current time, room state, the habit
+  for right now and the next habit, so "do it as usual" works and Qwen never
+  invents a habit.
+- Suggests a habit anywhere inside its window, once per day, only when someone
+  is present, one suggestion at a time (expires after 10 min unanswered).
+- Plain "yes/yeah/ok/sure" and "no/nah/not now" are handled without Qwen.
 - **Auto-execute** only if confidence ≥ 0.9 AND seen ≥ 5 times AND approved
   ≥ 3 times. Otherwise it asks. Qwen can never promote ask → auto by itself.
 - Your reply: **yes** → done as `source=auto`, approvals +1. **no** →

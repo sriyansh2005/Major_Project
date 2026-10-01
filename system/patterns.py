@@ -1,20 +1,31 @@
 """
-Phase 7: turn the user's labeled commands into habit patterns.
+Phase 7: turn the user's commands into habits.
 
-A pattern = (weekday/weekend, time slot, intent), e.g. "weekday night ->
-sleep_prep". For each one we store how reliable it is, the usual time, and
-the usual actions, so the agent's checker can ask (or act) at the right moment.
+How a habit is found
+  1. Take every user command (source='user'), with what it did to each device.
+     Skip commands followed by the PIR reporting the room empty within
+     LEAVE_WINDOW_MIN: that was the user leaving, which the PIR handles.
+  2. Per weekday/weekend + slot + device, group similar results:
+       fan  -> off, or speeds close to each other (30/40/50 = one group)
+       LED  -> colour family (blue/purple = "calm")
+     Counting what the devices did (not Qwen's intent label) means a wrong
+     label can't split one habit into pieces that each fall under the floor.
+  3. Keep a group if it happened on >= MIN_CONFIDENCE of matching days
+     (last RECENT_DAYS count double) and >= MIN_COUNT times.
+  4. Groups in the same slot whose usual times are within MERGE_MIN become one
+     habit ("light off + fan 30%"). Max MAX_PER_SLOT habits per slot.
+  5. A habit is valid for its whole slot. If a slot has several, the slot is
+     split at the midpoints between their usual times.
+
+Qwen's intent label is kept only for wording ("sleep_prep").
 
 Files (project root):
-  patterns.json  numbers for code: confidence, usual time, actions, and the
-                 runtime fields the agent updates (approvals, rejections,
-                 disabled, last_fired).
+  patterns.json  habits for code, plus runtime fields the agent updates
+                 (approvals, rejections, disabled, last_fired).
   patterns.txt   plain-English profile written by Qwen, loaded into the prompt.
-
-Only source='user' commands count, so PIR defaults and auto-actions can never
-teach the system a "habit" the user didn't choose.
 """
 
+import bisect
 import json
 import os
 import statistics
@@ -22,7 +33,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from system.behaviour_log import _conn, day_type_for, slot_for
+from system.behaviour_log import SLOTS, _conn, day_type_for, slot_for
 
 ROOT = Path(__file__).resolve().parent.parent
 PATTERNS_JSON = ROOT / "patterns.json"
@@ -32,130 +43,208 @@ PATTERNS_TXT = ROOT / "patterns.txt"
 RECENT_DAYS = 21          # the last 3 weeks...
 RECENT_WEIGHT = 2.0       # ...count double
 MIN_COUNT = 3             # floor: seen at least this many times
-MIN_CONFIDENCE = 0.6      # floor: happens on at least 60% of matching days
+MIN_CONFIDENCE = 0.6      # floor: happened on at least 60% of matching days
 MAX_PER_SLOT = 3          # keep the prompt small so Qwen doesn't get confused
+MERGE_MIN = 30            # device groups this close in time = one habit
+LEAVE_WINDOW_MIN = 10     # command + room empty within 10 min = leaving
+FAN_GAP = 25              # fan speeds further apart than this = different group
+FAN_SPAN = 40             # ...and one group never spans more than this
+
+# Colour families: colours in the same family count as the same habit.
+LED_FAMILY = {
+    "off": "off",
+    "blue": "calm", "purple": "calm", "cyan": "calm", "magenta": "calm",
+    "white": "bright", "yellow": "bright",
+    "red": "vivid", "green": "vivid",
+}
 
 # Acting
 AUTO_CONFIDENCE = 0.9     # auto-execute only if all three hold
 AUTO_MIN_COUNT = 5
 AUTO_MIN_APPROVALS = 3
 MUTE_AFTER = 3            # stop asking once rejections - approvals reaches this
-LEAD_MIN = 5              # ask up to 5 min before the usual time
-WINDOW_MIN = 60           # ...and until 60 min after it
 
 RUNTIME_FIELDS = {"approvals": 0, "rejections": 0, "disabled": False, "last_fired": None}
+SLOT_RANGE = {name: (lo * 60, hi * 60 + 59) for name, lo, hi in SLOTS}
+
+
+def hhmm(minute: int) -> str:
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def fan_band(speed: int) -> str:
+    if speed <= 0:
+        return "off"
+    return "low" if speed <= 40 else "medium" if speed <= 70 else "high"
 
 
 # --- Learning ----------------------------------------------------------------
 
-def _load_user_commands():
-    """Labeled user commands, plus the actions each one caused."""
+def _load_occurrences() -> list:
+    """One entry per (user command, device it changed), leaving commands removed."""
     with _conn() as c:
         cmds = c.execute(
             """
             SELECT e.id, e.ts, e.day_type, e.slot, i.name AS intent
-            FROM events e JOIN intents i ON i.id = e.intent_id
+            FROM events e LEFT JOIN intents i ON i.id = e.intent_id
             WHERE e.kind = 'command' AND e.source = 'user'
             """
         ).fetchall()
         acts = c.execute(
             "SELECT parent_id, tool, args FROM events"
-            " WHERE kind = 'action' AND parent_id IS NOT NULL"
+            " WHERE kind = 'action' AND parent_id IS NOT NULL ORDER BY id"
         ).fetchall()
-    by_parent = defaultdict(list)
+        absent = sorted(
+            datetime.fromisoformat(r["ts"]) for r in c.execute(
+                "SELECT ts FROM events WHERE kind = 'presence' AND utterance = 'absent'")
+        )
+
+    by_parent = defaultdict(dict)                 # last change per device wins
     for a in acts:
-        by_parent[a["parent_id"]].append({"tool": a["tool"], "args": json.loads(a["args"] or "{}")})
-    return [dict(r) for r in cmds], by_parent
+        by_parent[a["parent_id"]][a["tool"]] = json.loads(a["args"] or "{}")
+
+    occ = []
+    for r in cmds:
+        ts = datetime.fromisoformat(r["ts"])
+        i = bisect.bisect_right(absent, ts)
+        if i < len(absent) and absent[i] - ts <= timedelta(minutes=LEAVE_WINDOW_MIN):
+            continue                              # user left; the PIR handles that
+        base = {"date": ts.date(), "minute": ts.hour * 60 + ts.minute,
+                "day_type": r["day_type"], "slot": r["slot"], "intent": r["intent"]}
+        for tool, args in by_parent.get(r["id"], {}).items():
+            if tool == "set_fan":
+                on = args.get("on", True)
+                speed = int(args.get("speed", 100)) if on else 0
+                occ.append({**base, "device": "fan", "value": speed})
+            elif tool == "set_led" and args.get("color") in LED_FAMILY:
+                occ.append({**base, "device": "led", "value": args["color"]})
+    return occ
 
 
-def _typical_actions(occurrences: list) -> list:
-    """The actions the user usually takes for one pattern.
+def _fan_groups(occs: list) -> list:
+    """Split fan results into off + clusters of close speeds."""
+    groups = []
+    off = [o for o in occs if o["value"] == 0]
+    if off:
+        groups.append(off)
+    cur = []
+    for o in sorted((o for o in occs if o["value"] > 0), key=lambda o: o["value"]):
+        if cur and (o["value"] - cur[-1]["value"] > FAN_GAP
+                    or o["value"] - cur[0]["value"] > FAN_SPAN):
+            groups.append(cur)
+            cur = []
+        cur.append(o)
+    if cur:
+        groups.append(cur)
+    return groups
 
-    A device is included only if it was changed in at least half of the
-    occurrences. LED -> most common colour. Fan -> off, or on at the median speed.
-    """
-    n = len(occurrences)
-    per_tool = defaultdict(list)
-    for acts in occurrences:
-        for tool, args in {a["tool"]: a["args"] for a in acts}.items():
-            per_tool[tool].append(args)
 
-    result = []
-    for tool, arglist in sorted(per_tool.items()):
-        if len(arglist) < n / 2:
-            continue
-        if tool == "set_led":
-            color = Counter(a.get("color") for a in arglist).most_common(1)[0][0]
-            result.append({"tool": "set_led", "args": {"color": color}})
-        elif tool == "set_fan":
-            on = [a for a in arglist if a.get("on", True) and a.get("speed", 100) > 0]
-            if len(on) >= len(arglist) / 2:
-                speed = int(statistics.median(a.get("speed", 100) for a in on))
-                result.append({"tool": "set_fan", "args": {"on": True, "speed": speed}})
-            else:
-                result.append({"tool": "set_fan", "args": {"on": False}})
-    return result
+def _led_groups(occs: list) -> list:
+    fam = defaultdict(list)
+    for o in occs:
+        fam[LED_FAMILY[o["value"]]].append(o)
+    return list(fam.values())
 
 
 def compute_patterns() -> list:
-    """Build the pattern list from events.db (does not touch runtime fields)."""
-    cmds, by_parent = _load_user_commands()
-    if not cmds:
+    """Build the habit list from events.db (does not touch runtime fields)."""
+    occ = _load_occurrences()
+    if not occ:
         return []
 
-    for r in cmds:
-        r["dt"] = datetime.fromisoformat(r["ts"])
-    first = min(r["dt"] for r in cmds).date()
-    ref = max(r["dt"] for r in cmds).date()
+    first = min(o["date"] for o in occ)
+    ref = max(o["date"] for o in occ)
 
     def weight(day):
         return RECENT_WEIGHT if (ref - day).days < RECENT_DAYS else 1.0
 
-    # How many (weighted) weekdays / weekend days the data covers.
-    covered = defaultdict(float)
+    covered = defaultdict(float)                  # weighted weekdays / weekend days
     day = first
     while day <= ref:
         covered[day_type_for(day.weekday())] += weight(day)
         day += timedelta(days=1)
 
-    groups = defaultdict(list)
-    for r in cmds:
-        groups[(r["day_type"], r["slot"], r["intent"])].append(r)
+    by_key = defaultdict(list)
+    for o in occ:
+        by_key[(o["day_type"], o["slot"], o["device"])].append(o)
 
-    found = []
-    for (day_type, slot, intent), rows in groups.items():
-        if len(rows) < MIN_COUNT:
-            continue
-        days = {r["dt"].date() for r in rows}
-        confidence = min(1.0, sum(weight(d) for d in days) / covered[day_type])
-        if confidence < MIN_CONFIDENCE:
-            continue
-        actions = _typical_actions([by_parent[r["id"]] for r in rows])
-        if not actions:
-            continue
-        minute = int(statistics.median(r["dt"].hour * 60 + r["dt"].minute for r in rows))
-        found.append({
-            "id": f"{day_type}:{slot}:{intent}",
-            "day_type": day_type,
-            "slot": slot,
-            "intent": intent,
-            "typical_minute": minute,
-            "typical_time": f"{minute // 60:02d}:{minute % 60:02d}",
-            "actions": actions,
-            "confidence": round(confidence, 2),
-            "count": len(rows),
-            "days_seen": len(days),
-            "last_seen": max(r["dt"] for r in rows).date().isoformat(),
-        })
+    # Step 2 + 3: device groups that pass the floor.
+    parts = []
+    for (day_type, slot, device), occs in by_key.items():
+        groups = _fan_groups(occs) if device == "fan" else _led_groups(occs)
+        for g in groups:
+            days = {o["date"] for o in g}
+            if len(g) < MIN_COUNT:
+                continue
+            confidence = min(1.0, sum(weight(d) for d in days) / covered[day_type])
+            if confidence < MIN_CONFIDENCE:
+                continue
+            if device == "fan":
+                speed = int(statistics.median(o["value"] for o in g))
+                action = ({"tool": "set_fan", "args": {"on": True, "speed": speed}}
+                          if speed > 0 else {"tool": "set_fan", "args": {"on": False}})
+                label = fan_band(speed)
+            else:
+                recent = [o["value"] for o in g if weight(o["date"]) > 1] or [o["value"] for o in g]
+                color = Counter(recent).most_common(1)[0][0]
+                action = {"tool": "set_led", "args": {"color": color}}
+                label = LED_FAMILY[color]
+            parts.append({
+                "day_type": day_type, "slot": slot, "device": device, "label": label,
+                "minute": int(statistics.median(o["minute"] for o in g)),
+                "action": action, "confidence": confidence, "count": len(g),
+                "days": len(days), "last": max(o["date"] for o in g),
+                "intents": [o["intent"] for o in g if o["intent"]],
+            })
 
-    # At most MAX_PER_SLOT patterns per (day type, slot), strongest first.
+    # Step 4: merge device groups used together, then cap per slot.
     by_slot = defaultdict(list)
-    for p in found:
+    for p in parts:
         by_slot[(p["day_type"], p["slot"])].append(p)
-    kept = []
-    for lst in by_slot.values():
-        kept += sorted(lst, key=lambda p: -p["confidence"])[:MAX_PER_SLOT]
-    return sorted(kept, key=lambda p: (p["day_type"], p["typical_minute"]))
+
+    habits = []
+    for (day_type, slot), lst in by_slot.items():
+        merged = []
+        for p in sorted(lst, key=lambda p: p["minute"]):
+            for m in merged:
+                if (p["minute"] - m[0]["minute"] <= MERGE_MIN
+                        and p["device"] not in {x["device"] for x in m}):
+                    m.append(p)
+                    break
+            else:
+                merged.append([p])
+
+        slot_habits = []
+        for m in merged:
+            m.sort(key=lambda p: p["device"])
+            intents = Counter(i for p in m for i in p["intents"])
+            minute = int(statistics.median(p["minute"] for p in m))
+            slot_habits.append({
+                "id": f"{day_type}:{slot}:" + "+".join(f"{p['device']}-{p['label']}" for p in m),
+                "day_type": day_type,
+                "slot": slot,
+                "intent": intents.most_common(1)[0][0] if intents else "habit",
+                "typical_minute": minute,
+                "typical_time": hhmm(minute),
+                "actions": [p["action"] for p in m],
+                "confidence": round(min(p["confidence"] for p in m), 2),
+                "count": min(p["count"] for p in m),
+                "days_seen": min(p["days"] for p in m),
+                "last_seen": max(p["last"] for p in m).isoformat(),
+            })
+        slot_habits = sorted(slot_habits, key=lambda h: -h["confidence"])[:MAX_PER_SLOT]
+
+        # Step 5: whole slot, split at midpoints when the slot has several habits.
+        slot_habits.sort(key=lambda h: h["typical_minute"])
+        lo, hi = SLOT_RANGE[slot]
+        for i, h in enumerate(slot_habits):
+            start = lo if i == 0 else (slot_habits[i - 1]["typical_minute"] + h["typical_minute"]) // 2 + 1
+            end = hi if i == len(slot_habits) - 1 else (h["typical_minute"] + slot_habits[i + 1]["typical_minute"]) // 2
+            h.update(valid_from=start, valid_to=end, window=f"{hhmm(start)}-{hhmm(end)}")
+        habits += slot_habits
+
+    order = {name: i for i, (name, _, _) in enumerate(SLOTS)}
+    return sorted(habits, key=lambda h: (h["day_type"], order[h["slot"]], h["valid_from"]))
 
 
 def merge_runtime(new: list, old: list) -> list:
@@ -171,10 +260,11 @@ def merge_runtime(new: list, old: list) -> list:
 # --- Files -------------------------------------------------------------------
 
 def load_patterns(path=None) -> list:
+    """Habits from patterns.json. Entries from the old format are ignored."""
     path = Path(path or PATTERNS_JSON)
     if not path.exists():
         return []
-    return json.loads(path.read_text())["patterns"]
+    return [p for p in json.loads(path.read_text())["patterns"] if "valid_from" in p]
 
 
 def save_patterns(patterns: list, path=None):
@@ -189,7 +279,7 @@ def save_patterns(patterns: list, path=None):
 
 
 def update_pattern(pattern_id: str, **changes):
-    """Change runtime fields of one pattern (used by the agent)."""
+    """Change runtime fields of one habit (used by the agent)."""
     patterns = load_patterns()
     for p in patterns:
         if p["id"] == pattern_id:
@@ -217,17 +307,40 @@ def can_auto(p: dict) -> bool:
             and p["approvals"] >= AUTO_MIN_APPROVALS)
 
 
+def _valid_at(p: dict, now: datetime) -> bool:
+    minute = now.hour * 60 + now.minute
+    return (p["day_type"] == day_type_for(now.weekday()) and p["slot"] == slot_for(now.hour)
+            and p["valid_from"] <= minute <= p["valid_to"])
+
+
+def habit_now(patterns: list, now: datetime):
+    """The habit that applies right now (even if already suggested today)."""
+    return next((p for p in patterns if not p["disabled"] and _valid_at(p, now)), None)
+
+
 def due_patterns(patterns: list, now: datetime) -> list:
-    """Patterns that should fire right now, strongest first."""
-    day_type, slot = day_type_for(now.weekday()), slot_for(now.hour)
-    minute, today = now.hour * 60 + now.minute, now.date().isoformat()
-    due = [
-        p for p in patterns
-        if p["day_type"] == day_type and p["slot"] == slot
-        and not is_muted(p) and p["last_fired"] != today
-        and p["typical_minute"] - LEAD_MIN <= minute <= p["typical_minute"] + WINDOW_MIN
-    ]
+    """Habits that should be suggested right now, strongest first."""
+    today = now.date().isoformat()
+    due = [p for p in patterns
+           if _valid_at(p, now) and not is_muted(p) and p["last_fired"] != today]
     return sorted(due, key=lambda p: -p["confidence"])
+
+
+def next_habit(patterns: list, now: datetime):
+    """The next habit to start after `now` (today or tomorrow): (start, habit)."""
+    best = None
+    for days in (0, 1, 2):
+        day = (now + timedelta(days=days)).date()
+        midnight = datetime.combine(day, datetime.min.time())
+        for p in patterns:
+            if p["disabled"] or p["day_type"] != day_type_for(day.weekday()):
+                continue
+            start = midnight + timedelta(minutes=p["valid_from"])
+            if start > now and (best is None or start < best[0]):
+                best = (start, p)
+        if best:
+            return best
+    return None
 
 
 def describe_actions(actions: list) -> str:
@@ -241,11 +354,35 @@ def describe_actions(actions: list) -> str:
     return " and ".join(parts)
 
 
+def describe(p: dict) -> str:
+    return f"{describe_actions(p['actions'])} ({p['intent'].replace('_', ' ')})"
+
+
+def now_context(patterns: list, now: datetime, state: dict) -> str:
+    """What Qwen needs to know about this moment, sent with every message."""
+    led = "off" if state["led"] == "off" else state["led"]
+    fan = f"{state['fan_speed']}%" if state["fan_on"] else "off"
+    lines = [
+        f"Current time: {now:%A %Y-%m-%d %H:%M} "
+        f"({day_type_for(now.weekday())}, {slot_for(now.hour)} slot).",
+        f"Room now: fan {fan}, light {led}, "
+        f"{'someone is home' if state.get('present') else 'nobody detected'}.",
+    ]
+    cur = habit_now(patterns, now)
+    lines.append(f"User's habit for right now: {describe(cur)}." if cur
+                 else "User's habit for right now: none.")
+    nxt = next_habit(patterns, now)
+    if nxt:
+        start, p = nxt
+        lines.append(f"Next habit: from {start:%A %H:%M} (usually around {p['typical_time']}): "
+                     f"{describe(p)}.")
+    return "\n".join(lines)
+
+
 def pattern_lines(patterns: list) -> str:
-    """Plain summary of the patterns (fallback profile, and Qwen's input)."""
+    """Plain summary of the habits (fallback profile, and Qwen's input)."""
     return "\n".join(
-        f"- {p['day_type']} {p['slot']} around {p['typical_time']}: {p['intent']} "
-        f"-> {describe_actions(p['actions'])} "
-        f"(on {p['confidence']:.0%} of {p['day_type']}s, {p['count']} times)"
+        f"- {p['day_type']} {p['slot']} ({p['window']}, usually ~{p['typical_time']}): "
+        f"{describe(p)}, on {p['confidence']:.0%} of {p['day_type']}s"
         for p in patterns
     )

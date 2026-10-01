@@ -25,14 +25,17 @@ from system import patterns as pt
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen2.5:3b"
 
-PROMPT = """Below are habits learned from how one person uses their smart home
-(a fan and an RGB light). Write 3 to 6 short bullet points that describe their
-routine and the intent behind it, for a home assistant to read before talking
-to them. Mention weekday vs weekend and the usual times. Plain facts only, no
-greeting, no advice.
+PROMPT = """These are habits learned from how one person uses their smart home
+(a fan and an RGB light). Each line: when it happens, what they do, and a label
+for why.
 
-Habits:
-{lines}"""
+{lines}
+
+Write 3 to 6 short sentences describing this person's daily routine and the
+reason behind each habit, for a home assistant to read before talking to them.
+Separate weekdays from weekends and give the usual times. Explain the reason
+(for example "cools the room down when they get home"), do not just repeat the
+numbers or percentages. No greeting, no advice, no bullet symbols."""
 
 
 def ask_qwen_profile(lines: str) -> str:

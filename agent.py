@@ -46,9 +46,19 @@ SYSTEM_PROMPT = (
     "Use set_fan to change the fan (speed 0-100; 'half'=50, 'low'~30, 'high'=100). "
     "Use set_led to change the LED colour (red, green, blue, yellow, cyan, "
     "purple, white, off). Only call a tool when hardware action is needed; "
-    "otherwise reply in one or two friendly sentences. Use what you know about "
-    "the user's habits to understand vague requests."
+    "otherwise reply in one or two friendly sentences.\n"
+    "Each user message starts with the current time, the room state, the user's "
+    "habit for right now and the next habit. Use them. If the user says things "
+    "like 'as usual', 'my usual' or 'according to my pattern', do the habit for "
+    "right now; if there is none, do the next habit and say which one. Never "
+    "invent a habit that is not listed."
 )
+
+# Plain answers to a suggestion are handled without Qwen (fast and can't be misread).
+YES = {"yes", "yeah", "yea", "yep", "yup", "ya", "ok", "okay", "sure", "do it",
+       "go ahead", "please", "yes please", "sounds good", "alright", "fine", "y"}
+NO = {"no", "nah", "nope", "not now", "no thanks", "no thank you", "later",
+      "skip", "n", "leave it", "don't", "dont"}
 
 ANSWER_RULES = (
     "You just suggested this to the user: \"{question}\" "
@@ -106,12 +116,19 @@ def trim(history: list):
 
 # --- Normal commands ---------------------------------------------------------
 
+def with_context(text: str) -> dict:
+    """The user's message, prefixed with what's true right now."""
+    ctx = pt.now_context(pt.load_patterns(), now(), get_state())
+    return {"role": "user", "content": f"{ctx}\n\nUser says: {text}"}
+
+
 def handle(user_text: str, history: list) -> str:
     """One turn: log the user's words, let Qwen pick tools, queue them."""
     cmd_id = log_command(user_text, get_state())
     history.append({"role": "user", "content": user_text})
     trim(history)
-    msg = ask_qwen(history)
+    # History keeps the plain text; only this call gets the live context.
+    msg = ask_qwen(history[:-1] + [with_context(user_text)])
     history.append({"role": "assistant", "content": msg.get("content") or ""})
 
     calls = tool_calls(msg)
@@ -124,8 +141,8 @@ def handle(user_text: str, history: list) -> str:
 
 def phrase_question(p: dict) -> str:
     """Let Qwen word the suggestion like a chat; fall back to a template."""
-    fallback = (f"It's around {p['typical_time']}, when you usually go for "
-                f"{p['intent'].replace('_', ' ')}. Want me to set {pt.describe_actions(p['actions'])}?")
+    fallback = (f"You usually set {pt.describe_actions(p['actions'])} around "
+                f"{p['typical_time']} ({p['intent'].replace('_', ' ')}). Want me to do that now?")
     try:
         msg = ask_qwen([
             {"role": "system", "content": build_system_prompt()},
@@ -209,13 +226,26 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
         feedback("never")
         return "Got it, I won't suggest that again."
 
+    current = next((x for x in pt.load_patterns() if x["id"] == p["id"]), p)
+    plain = reply.lower().strip(" .!?,")
+    suggested = [(a["tool"], a["args"]) for a in p["actions"]]
+
+    if plain in YES:
+        pt.update_pattern(p["id"], approvals=current["approvals"] + 1)
+        feedback("approved")
+        return "Done: " + "; ".join(queue(suggested, sug["event_id"], "auto"))
+    if plain in NO:
+        pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
+        feedback("rejected")
+        return "Okay, leaving it as it is."
+
+    # Anything else ("no, make it blue") -> let Qwen work out what they want.
     msg = ask_qwen([
         {"role": "system", "content": build_system_prompt() + "\n\n" + ANSWER_RULES.format(
             question=sug["question"], actions=pt.describe_actions(p["actions"]))},
-        {"role": "user", "content": reply},
+        with_context(reply),
     ])
     calls = tool_calls(msg)
-    current = next((x for x in pt.load_patterns() if x["id"] == p["id"]), p)
 
     if not calls:
         pt.update_pattern(p["id"], rejections=current["rejections"] + 1)
