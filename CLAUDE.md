@@ -187,6 +187,17 @@ source ~/major/venv/bin/activate && python controller.py
 source ~/major/venv/bin/activate && python agent.py
 ```
 
+### Simulating a date/time (testing)
+
+```bash
+python controller.py --time "2026-09-30 23:00"
+```
+
+The clock starts at that date/time and runs on in real time. It's stored in
+`events.db` (`state.sim_offset`), so `agent.py`'s habit checker and all event
+logging use the same simulated time. Start `agent.py` normally. Running
+`controller.py` without `--time` switches back to the real clock.
+
 `controller.py` has a 30 s PIR warm-up. `DEBUG = True` in it prints
 `raw / filtered / held / active / present` so you can watch presence build to 5 s;
 set `DEBUG = False` for quiet operation. Test single files with

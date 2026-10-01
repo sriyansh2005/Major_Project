@@ -27,6 +27,7 @@ from system.behaviour_log import (
     get_state,
     log_command,
     log_event,
+    now,
 )
 
 # --- Config ------------------------------------------------------------------
@@ -238,7 +239,7 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
 def checker(stop: threading.Event):
     while not stop.wait(CHECK_EVERY):
         try:
-            tick(datetime.now())
+            tick(now())
         except Exception as e:                  # never let the checker die
             print(f"\n[checker] error: {e}\n> ", end="", flush=True)
 

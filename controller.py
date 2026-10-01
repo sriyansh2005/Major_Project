@@ -14,7 +14,9 @@ Only this file imports the device modules, so the pins have a single owner
 and there is no GPIO conflict.
 """
 
+import argparse
 import json
+from datetime import datetime
 from collections import deque
 from time import sleep, monotonic
 
@@ -27,6 +29,7 @@ from system.behaviour_log import (
     log_action,
     log_presence,
     set_presence,
+    set_sim_time,
     set_state,
     fetch_pending_commands,
     mark_command_done,
@@ -89,7 +92,18 @@ def apply_pending_commands():
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Hardware controller.")
+    ap.add_argument("--time", metavar='"YYYY-MM-DD HH:MM"',
+                    help="simulate this date/time for testing; the clock runs on from it")
+    opts = ap.parse_args()
+
     init_db()
+    if opts.time:
+        start = datetime.strptime(opts.time, "%Y-%m-%d %H:%M")
+        set_sim_time(start)
+        print(f"SIMULATED CLOCK: starting at {start:%A %Y-%m-%d %H:%M}")
+    else:
+        set_sim_time(None)               # real time
     s = snapshot()                       # publish the real starting state
     set_state(s["fan_on"], s["fan_speed"], s["led"])
     set_presence(False)

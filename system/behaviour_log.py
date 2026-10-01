@@ -15,7 +15,7 @@ auto-actions never get mistaken for the user's own habits.
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # events.db lives at the project root (this file is in system/).
@@ -128,6 +128,7 @@ def init_db():
                 fan_speed   INTEGER NOT NULL,
                 led         TEXT    NOT NULL,
                 present     INTEGER NOT NULL DEFAULT 0,   -- someone in the room (PIR)
+                sim_offset  REAL,              -- simulated clock: seconds added to real time
                 updated_at  TEXT    NOT NULL
             )
             """
@@ -155,6 +156,7 @@ def init_db():
         # Upgrade a Phase 6 database in place (keeps existing rows + intents).
         for table, col, ddl in (
             ("state", "present", "INTEGER NOT NULL DEFAULT 0"),
+            ("state", "sim_offset", "REAL"),
             ("commands", "source", "TEXT NOT NULL DEFAULT 'user'"),
         ):
             have = [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]
@@ -171,7 +173,7 @@ def log_event(kind, source, *, utterance=None, tool=None, args=None,
     args/before/after are dicts (stored as JSON). ts defaults to now; pass a
     datetime to backfill.
     """
-    ts = ts or datetime.now()
+    ts = ts or now()
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO events (ts, weekday, day_type, hour, slot, kind, source,"
@@ -204,6 +206,24 @@ def log_action(tool, args, before, after, source, parent_id=None) -> int:
 def log_presence(state: str) -> int:
     """PIR presence change: 'present' or 'absent'."""
     return log_event("presence", "pir", utterance=state)
+
+
+# --- Clock (real, or simulated for testing) ----------------------------------
+
+def now() -> datetime:
+    """The system's current time. Real time, unless controller.py was started
+    with --time, in which case the clock runs on from the time you gave it."""
+    with _conn() as c:
+        r = c.execute("SELECT sim_offset FROM state WHERE id=1").fetchone()
+    offset = r["sim_offset"] if r else None
+    return datetime.now() + timedelta(seconds=offset or 0)
+
+
+def set_sim_time(start: datetime = None):
+    """Start the simulated clock at `start`, or switch back to real time (None)."""
+    offset = (start - datetime.now()).total_seconds() if start else None
+    with _conn() as c:
+        c.execute("UPDATE state SET sim_offset=? WHERE id=1", (offset,))
 
 
 # --- Current room state ------------------------------------------------------
