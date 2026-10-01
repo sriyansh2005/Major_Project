@@ -29,6 +29,12 @@ FAN_LEVELS = [(r"\b(max|maximum|full|highest|high)\b", 100), (r"\b(half|medium|m
 # Words that mean the user wants something Qwen should interpret.
 VAGUE = r"\b(colou?r|cool|warm|chill|relax|cosy|cozy|dim|bright|mood|nice|soft|usual|pattern|habit)\b"
 NEGATED = r"\b(don'?t|do not|never|not)\s+(start|turn|switch|run|set|stop|change)\b"
+# Describing the room, not asking for a change: "led is white yet", "fan still off".
+# Only counts as a description when there is no command verb in it, so
+# "u are not calling the tool start the fan" is still a command.
+STATEMENT = r"\b(is|are|was|were|still|yet|already|isn'?t|aren'?t|wasn'?t|didn'?t|hasn'?t|haven'?t)\b"
+COMMAND_VERB = (r"\b(start|turn|switch|set|make|change|stop|increase|decrease|run|put|"
+                r"reduce|raise|lower|shut|speed)\b")
 FILLER = {"hi", "hello", "hey", "please", "pls", "ok", "okay", "now", "thanks",
           "thank you", "and", "also", "then", "bro", "yo",
           # answer words in a correction: "no, fan 60" / "nah just make it blue"
@@ -81,7 +87,9 @@ def parse(text: str, state: dict):
     for clause in _clauses(text):
         words = set(re.findall(r"[a-z']+", clause))
         found = None
-        if words & FAN_WORDS:
+        if re.search(STATEMENT, clause) and not re.search(COMMAND_VERB, clause):
+            found = None                  # a description or complaint -> Qwen
+        elif words & FAN_WORDS:
             found = _fan(clause, state)
         elif words & LIGHT_WORDS or any(re.search(rf"\b{c}\b", clause) for c in COLORS):
             found = _light(clause, bool(words & LIGHT_WORDS))

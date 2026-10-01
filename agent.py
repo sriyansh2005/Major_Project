@@ -1,14 +1,18 @@
 """
-Agent: natural language -> Qwen (via Ollama) -> queued hardware commands,
-plus proactive suggestions from learned habits (Phase 7).
+Agent: natural language -> queued hardware commands, plus proactive
+suggestions from learned habits (Phase 7).
 
     python agent.py                      # chat (with habit suggestions)
     python agent.py "fan to 50"          # one-shot command, no suggestions
 
-What it knows about you comes from patterns.txt (loaded into the prompt).
-A background checker reads patterns.json every CHECK_EVERY seconds; when one
-of your habits is due and someone is in the room, it either asks you in the
-chat or, for habits you've approved enough times, does it and tells you.
+How a message is handled:
+  1. Clear commands ("start the fan", "light blue") are read by
+     system/commands.py and run instantly, no Qwen.
+  2. Everything else goes to Qwen, which answers by filling in a JSON form
+     {light, fan, feeling, reply}. A 3B model fills a form far more reliably
+     than it makes tool calls, so "I'm sad, set the mood" actually changes
+     the room instead of just replying "Done."
+  3. A background checker suggests habits from patterns.json when they are due.
 """
 
 import json
@@ -22,7 +26,7 @@ import requests
 
 from system import commands
 from system import patterns as pt
-from system.tool_schemas import TOOLS
+from system.tool_schemas import COLOR_NAMES
 from system.behaviour_log import (
     init_db,
     enqueue_command,
@@ -30,10 +34,11 @@ from system.behaviour_log import (
     log_command,
     log_event,
     now,
+    set_feeling,
 )
 
 # --- Config ------------------------------------------------------------------
-OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
+OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen2.5:3b"
 CHECK_EVERY = 30          # seconds between habit checks
 REASK_MIN = 5             # ask again after a "no" / no answer (set to 20 after testing)
@@ -41,32 +46,44 @@ MAX_ASKS = 3              # per habit per day
 PENDING_TTL = REASK_MIN * 60   # an unanswered suggestion expires before the re-ask
 MAX_HISTORY = 12          # chat turns kept in the prompt (keeps Qwen fast)
 
-# The agent does NOT touch GPIO. Tool calls are queued in the DB and the
-# controller applies them (and logs the action linked via parent_id).
-TOOL_NAMES = {"set_fan", "set_led"}
+SYSTEM_PROMPT = """You are a home assistant on a Raspberry Pi controlling a fan and an RGB light.
+Answer every message by filling in this JSON form:
+  "light":   one of red, green, blue, yellow, cyan, purple, magenta, white, off;
+             or null to leave the light as it is
+  "fan":     0 (off) to 100 (low=30, half=50, high=100); or null to leave it
+  "feeling": the user's feeling if they express one, one lowercase word
+             (sad, stressed, tired, happy, hot, cold, ...); else null
+  "reply":   one or two short, kind sentences to the user saying what you changed
+Rules, in this order:
+1. The user's direct request always wins. Set exactly what they ask, now,
+   whatever their habits or the time of day. Never refuse or delay.
+2. If they mention a feeling or a mood, change the room to suit it. If the
+   background lists what they chose before for that feeling, use that.
+   Otherwise choose what you think fits and say so; they can correct you.
+   The light cannot dim: "warm" means yellow, "cool" means blue or cyan.
+3. If they complain that something did not change, set it now.
+4. Habits are background only. Use them when they say "as usual", "my
+   pattern" or something vague. If there is no habit for right now, ask what
+   they would like and leave light and fan null. Never invent a habit.
+5. For questions or chat, leave light and fan null and just reply."""
 
-SYSTEM_PROMPT = (
-    "You are a home assistant on a Raspberry Pi controlling a fan and an RGB LED.\n"
-    "Tools: set_fan (on/off, speed 0-100: low=30, half=50, high=100) and "
-    "set_led (red, green, blue, yellow, cyan, purple, magenta, white, off).\n"
-    "Rules, in this order:\n"
-    "1. The user's direct request always wins. If they ask to change the fan or "
-    "the light, call the tool and do exactly that, right now, whatever their "
-    "habits or the time of day. Never refuse, delay or argue.\n"
-    "2. To change anything you MUST call a tool. Never say you changed "
-    "something without calling the tool.\n"
-    "3. Habits are background only. Use them only when the user asks for 'the "
-    "usual', 'as usual', 'my pattern' or is vague ('I'm hot'). If there is no "
-    "habit for right now, ask the user what they would like. Never invent a "
-    "habit that is not listed.\n"
-    "4. Otherwise reply in one or two short, friendly sentences."
-)
+DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "light": {"type": ["string", "null"]},
+        "fan": {"type": ["integer", "null"]},
+        "feeling": {"type": ["string", "null"]},
+        "reply": {"type": "string"},
+    },
+    "required": ["light", "fan", "feeling", "reply"],
+}
 
-NUDGE = ("You described a change but did not call a tool, so nothing happened. "
-         "If the user wants a change, call set_fan / set_led now. Otherwise just reply.")
-CLAIMS_ACTION = re.compile(
-    r"\b(i'?ll|i will|i'?ve|i have|setting|turning|switching|starting|now)\b.*\b(fan|light|led)\b"
-    r"|\b(fan|light|led)\b.*\b(set to|turned|switched|is now)\b")
+LIGHT_ALIAS = {**commands.COLOR_ALIAS, "warm": "yellow", "cool": "blue", "none": "off"}
+NUDGE = ('Your reply says you changed something, but "light" and "fan" are both '
+         "null, so nothing happened. Fill in the values you meant.")
+CLAIMS = re.compile(r"\b(set|setting|turned|turning|switched|switching|changed|changing|made|"
+                    r"making|started|starting|i'?ll|i will|i'?ve|done)\b")
+DEVICE = re.compile(r"\b(fan|light|led|lamp|colou?r|" + "|".join(COLOR_NAMES) + r")\b")
 
 # Plain answers to a suggestion are handled without Qwen (fast and can't be misread).
 YES = {"yes", "yeah", "yea", "yep", "yup", "ya", "ok", "okay", "sure", "do it",
@@ -74,13 +91,11 @@ YES = {"yes", "yeah", "yea", "yep", "yup", "ya", "ok", "okay", "sure", "do it",
 NO = {"no", "nah", "nope", "not now", "no thanks", "no thank you", "later",
       "skip", "n", "leave it", "don't", "dont"}
 
-ANSWER_RULES = (
-    "You just suggested this to the user: \"{question}\" "
-    "(suggested actions: {actions}). Read their reply.\n"
-    "- If they agree, call the tools for exactly the suggested actions.\n"
-    "- If they want something different, call the tools for what they want.\n"
-    "- If they decline, call no tools and reply in one short sentence."
-)
+ANSWER_RULES = """You just suggested this to the user: "{question}"
+(suggested: {actions}). Read their reply.
+- If they agree, fill in exactly the suggested values.
+- If they want something different, fill in what they want.
+- If they decline, leave light and fan null and reply in one short sentence."""
 
 lock = threading.Lock()
 pending = None            # the suggestion waiting for an answer
@@ -92,25 +107,63 @@ def build_system_prompt() -> str:
     return f"{SYSTEM_PROMPT}\n\nWhat you know about this user:\n{pt.load_profile()}"
 
 
-def ask_qwen(messages: list, tools: bool = True) -> dict:
-    payload = {"model": MODEL, "messages": messages}
-    if tools:
-        payload["tools"] = TOOLS
+def ask_qwen(messages: list, schema: dict = None) -> str:
+    """One Qwen call via Ollama. With a schema the reply is forced to valid JSON."""
+    payload = {"model": MODEL, "messages": messages, "stream": False,
+               "options": {"temperature": 0.2}}
+    if schema:
+        payload["format"] = schema
     resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
+    if schema and resp.status_code >= 400:      # Ollama can't use the schema: plain JSON mode
+        payload["format"] = "json"
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
+    return resp.json()["message"]["content"]
 
 
-def tool_calls(msg: dict) -> list:
-    """[(name, args), ...] from a Qwen reply, ignoring unknown tools."""
-    calls = []
-    for call in msg.get("tool_calls") or []:
-        name = call["function"]["name"]
-        args = call["function"]["arguments"]
-        args = json.loads(args) if isinstance(args, str) else (args or {})
-        if name in TOOL_NAMES:
-            calls.append((name, args))
-    return calls
+def parse_decision(text: str) -> dict:
+    """Turn Qwen's JSON form into checked actions. Bad values are dropped."""
+    data = json.loads(text)
+    actions = []
+    fan = data.get("fan")
+    if isinstance(fan, (int, float)) and not isinstance(fan, bool):
+        fan = max(0, min(100, int(fan)))
+        actions.append(("set_fan", {"on": False} if fan == 0 else {"on": True, "speed": fan}))
+    light = str(data.get("light") or "").strip().lower()
+    light = LIGHT_ALIAS.get(light, light)
+    if light in COLOR_NAMES:
+        actions.append(("set_led", {"color": light}))
+    feeling = re.sub(r"[^a-z]", "", str(data.get("feeling") or "").lower())
+    return {"actions": actions,
+            "feeling": None if feeling in ("", "none", "null", "neutral") else feeling,
+            "reply": str(data.get("reply") or "").strip()}
+
+
+def decide(messages: list) -> dict:
+    """Ask Qwen to fill in the form. Retries once on broken JSON, and once if
+    the reply claims a change while light and fan are both null."""
+    for _ in range(2):
+        try:
+            d = parse_decision(ask_qwen(messages, DECISION_SCHEMA))
+            break
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            continue
+    else:
+        return {"actions": [], "feeling": None, "reply": ""}
+
+    reply = d["reply"].lower()
+    if not d["actions"] and CLAIMS.search(reply) and DEVICE.search(reply):
+        try:
+            retry = parse_decision(ask_qwen(
+                messages + [{"role": "assistant", "content": json.dumps(
+                    {"light": None, "fan": None, "feeling": d["feeling"], "reply": d["reply"]})},
+                            {"role": "user", "content": NUDGE}], DECISION_SCHEMA))
+            if retry["actions"]:
+                retry["feeling"] = retry["feeling"] or d["feeling"]
+                d = retry
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+    return d
 
 
 def queue(calls: list, parent_id: int, source: str) -> list:
@@ -138,20 +191,8 @@ def with_context(text: str) -> dict:
         f"request always wins):\n{ctx}\n\nUser says: {text}")}
 
 
-def ask_with_retry(messages: list) -> tuple:
-    """Ask Qwen; if it claims a change but called no tool, remind it once."""
-    msg = ask_qwen(messages)
-    calls = tool_calls(msg)
-    content = (msg.get("content") or "").lower()
-    if not calls and CLAIMS_ACTION.search(content):
-        msg = ask_qwen(messages + [{"role": "assistant", "content": msg.get("content") or ""},
-                                   {"role": "user", "content": NUDGE}])
-        calls = tool_calls(msg)
-    return msg, calls
-
-
 def handle(user_text: str, history: list) -> str:
-    """One turn: log the user's words, let Qwen pick tools, queue them."""
+    """One turn: log the user's words, decide what to change, queue it."""
     state = get_state()
     cmd_id = log_command(user_text, state)
     history.append({"role": "user", "content": user_text})
@@ -163,17 +204,18 @@ def handle(user_text: str, history: list) -> str:
         history.append({"role": "assistant", "content": "Done."})
         return "Done: " + "; ".join(queue(direct, cmd_id, "user"))
 
-    # 2) Otherwise Qwen decides (history keeps the plain text; only this call
-    #    gets the live context).
-    msg, calls = ask_with_retry(history[:-1] + [with_context(user_text)])
-    history.append({"role": "assistant", "content": msg.get("content") or ""})
+    # 2) Otherwise Qwen fills in the form (only this call gets the live context).
+    d = decide(history[:-1] + [with_context(user_text)])
+    if d["feeling"]:
+        set_feeling(cmd_id, d["feeling"])
+    history.append({"role": "assistant", "content": d["reply"] or "Okay."})
 
-    # 3) Safety net: Qwen did nothing, but part of the message was clear.
-    if not calls and direct:
-        calls = direct
+    # 3) Safety net: Qwen changed nothing, but part of the message was clear.
+    calls = d["actions"] or direct
     if not calls:
-        return msg.get("content") or "(no reply)"
-    return "Done: " + "; ".join(queue(calls, cmd_id, "user"))
+        return d["reply"] or "(no reply)"
+    done = "Done: " + "; ".join(queue(calls, cmd_id, "user"))
+    return f"{d['reply']}\n{done}" if d["reply"] else done
 
 
 # --- Proactive suggestions ---------------------------------------------------
@@ -183,15 +225,14 @@ def phrase_question(p: dict) -> str:
     fallback = (f"You usually set {pt.describe_actions(p['actions'])} around "
                 f"{p['typical_time']} ({p['intent'].replace('_', ' ')}). Want me to do that now?")
     try:
-        msg = ask_qwen([
-            {"role": "system", "content": build_system_prompt()},
+        text = ask_qwen([
             {"role": "user", "content": (
-                "Write ONE short, friendly question offering to do this for the user "
-                f"now: {pt.describe_actions(p['actions'])}. Reason: it's {p['day_type']} "
-                f"{p['slot']} and they usually do this around {p['typical_time']} "
-                f"({p['intent'].replace('_', ' ')}). Only the question.")},
-        ], tools=False)
-        text = (msg.get("content") or "").strip().strip('"')
+                "You are a friendly home assistant. Write ONE short question offering "
+                f"to do this for the user now: {pt.describe_actions(p['actions'])}. "
+                f"Reason: it's {p['day_type']} {p['slot']} and they usually do this "
+                f"around {p['typical_time']} ({p['intent'].replace('_', ' ')}). "
+                "Only the question, nothing else.")},
+        ]).strip().strip('"')
         return text if 0 < len(text) < 200 else fallback
     except requests.RequestException:
         return fallback
@@ -295,21 +336,20 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
     # A clear direct command ("no, fan 60") is done exactly, no Qwen needed.
     direct, sure = commands.parse(reply, get_state())
     if sure:
-        msg, calls = {"content": ""}, direct
+        d = {"actions": direct, "feeling": None, "reply": ""}
     else:
         # Anything else ("no, make it cosy") -> let Qwen work out what they want.
-        msg, calls = ask_with_retry([
+        d = decide([
             {"role": "system", "content": build_system_prompt() + "\n\n" + ANSWER_RULES.format(
                 question=sug["question"], actions=pt.describe_actions(p["actions"]))},
             with_context(reply),
         ])
-        if not calls and direct:
-            calls = direct
+    calls = d["actions"] or direct
 
     if not calls:
         declined()
         feedback("rejected")
-        return msg.get("content") or "Okay, leaving it as it is."
+        return d["reply"] or "Okay, leaving it as it is."
 
     if same_actions(calls, p["actions"]):
         # Approved: done as auto (it was the system's idea), counted as an approval.
@@ -323,6 +363,8 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
     pt.update_pattern(p["id"], done_date=today)      # they chose; stop asking today
     feedback("corrected")
     cmd_id = log_command(reply, get_state())
+    if d["feeling"]:
+        set_feeling(cmd_id, d["feeling"])
     return "Okay, instead: " + "; ".join(queue(calls, cmd_id, "user"))
 
 

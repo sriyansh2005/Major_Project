@@ -13,6 +13,7 @@ events.db-shm
 patterns.json
 patterns.json.tmp
 patterns.txt
+patterns_summary.txt
 
 # Logs
 *.log

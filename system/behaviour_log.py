@@ -95,7 +95,8 @@ def init_db():
                 before_state  TEXT,               -- JSON room state before
                 after_state   TEXT,               -- JSON room state after
                 parent_id     INTEGER,            -- action row -> its command row
-                intent_id     INTEGER             -- filled by update_intents.py
+                intent_id     INTEGER,            -- filled by update_intents.py
+                feeling       TEXT                -- e.g. sad / stressed, from Qwen
             )
             """
         )
@@ -158,6 +159,7 @@ def init_db():
             ("state", "present", "INTEGER NOT NULL DEFAULT 0"),
             ("state", "sim_offset", "REAL"),
             ("commands", "source", "TEXT NOT NULL DEFAULT 'user'"),
+            ("events", "feeling", "TEXT"),
         ):
             have = [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]
             if col not in have:
@@ -328,6 +330,18 @@ def uncategorized_commands() -> list:
                             for a in acts],
             })
     return out
+
+
+def set_feeling(event_id: int, feeling: str):
+    """Store how the user felt when giving a command (None = no feeling)."""
+    with _conn() as c:
+        c.execute("UPDATE events SET feeling=? WHERE id=?", (feeling, event_id))
+
+
+def known_feelings() -> list:
+    with _conn() as c:
+        return [r["feeling"] for r in c.execute(
+            "SELECT DISTINCT feeling FROM events WHERE feeling IS NOT NULL ORDER BY feeling")]
 
 
 def set_intent(event_ids: list, intent_id: int):

@@ -54,10 +54,17 @@ can have a single owner); the agent sends requests through a shared SQLite queue
   `commands` table → the controller applies it (~20×/sec poll) → hardware moves.
   **Your direct request always wins:** clear commands ("start the fan", "fan 60",
   "light blue", "turn off the light and start the fan") are read by
-  `system/commands.py` and run instantly without Qwen. Vague ones ("I'm hot",
-  "as usual", "make it cosy") go to Qwen, which is told never to refuse a request
-  and, if it says it changed something without calling a tool, is reminded once.
-  Habits are background only; with no habit for right now, Qwen asks you.
+  `system/commands.py` and run instantly without Qwen. Descriptions like "led is
+  white yet" are not commands. Vague ones ("I'm sad", "make it warm", "as usual")
+  go to Qwen, which answers by filling in a **JSON form** `{light, fan, feeling,
+  reply}` (Ollama forces valid JSON). A 3B model fills a form far more reliably
+  than it makes tool calls. If the reply claims a change but the form is empty,
+  Qwen is asked once more. Habits are background only; with no habit for right
+  now, Qwen asks you.
+- **Feelings (learned, not a fixed table):** when you mention a feeling, Qwen
+  records it (`events.feeling`) and picks a setting. Whatever you end up with in
+  the next 10 min (its choice plus your corrections) becomes your preference for
+  that feeling once seen twice, and is shown to Qwen next time.
 - **Priority:** an agent command sets `manual_override` for that visit, so the
   PIR will not overwrite your chosen colour/speed. The override clears when you
   leave (away-timeout).
@@ -85,6 +92,9 @@ Major-project/
 │   └── patterns.py         #   habit statistics, patterns.json I/O, ask/auto rules
 ├── data/
 │   └── synthetic_events.db #   4 weeks of fake user behaviour for testing
+├── tests/                 # python tests/run_all.py (no Pi, no Qwen needed)
+├── tools/
+│   └── qwen_check.py       #   real-Qwen check on the Pi (copies the DB, no hardware)
 ├── events.db              # runtime DB (generated; git-ignored)
 ├── patterns.json          # learned habits for code (generated; git-ignored)
 ├── patterns.txt           # learned habits in English for Qwen (generated; git-ignored)
@@ -159,9 +169,13 @@ Then restart `agent.py`. `update_patterns.py`:
    names it (e.g. sleep_prep).
 5. Each habit is valid for its **whole slot**; two habits in one slot split it
    at the midpoint of their usual times.
-6. Writes `patterns.json` (carrying over `approvals`, `rejections`,
-   `disabled`, `last_fired`) and asks Qwen for `patterns.txt`, a short
-   description of the routine and the reasons; falls back to a plain list.
+6. Learns **feeling preferences** (see above) and writes `patterns.json`
+   (habits + preferences, carrying over your yes/no answers) and `patterns.txt`,
+   built straight from the data so it can't contain made-up facts.
+   `python update_patterns.py --summary` also asks Qwen for a friendly
+   paragraph in `patterns_summary.txt`, for you only (not used by the agent).
+
+`update_intents.py` also asks Qwen for the feeling in each request.
 
 Tunables (floors, fan gap, colour families) are at the top of `system/patterns.py`.
 
@@ -260,12 +274,19 @@ git checkout main           # return to latest
 | 4 | Detect user → auto-start fan+LED (rule-based) | ✅ Done | `phase-4` | + `controller.py`, `tool_schemas.py`, command-queue refactor |
 | 5 | Voice commands | ⏸ Parked (no mic) | `phase-5` | Deepgram STT (cloud), push-to-talk; needs a USB mic |
 | 6 | Store user behaviour | 🧪 Built, testing on Pi (branch `phase-6`) | `phase-6` | new schema, `update_intents.py`, `data/synthetic_events.db` |
-| 7 | Learn patterns → act with permission | 🧪 Built, testing on Pi (branch `phase-7`) | `phase-7` | `system/patterns.py`, `update_patterns.py`, `learn.py`, checker in `agent.py` |
+| 7 | Learn patterns → act with permission | 🧪 Built, testing on Pi (branches `phase-7`, `phase-7-fixes`) | `phase-7` | `system/patterns.py`, `update_patterns.py`, `learn.py`, checker in `agent.py` |
 | 8 | Try Hermes Agent (optional) | ⏳ Planned | `phase-8` | wrap tools as MCP; Hermes owns the loop |
 
 > Note: phases 1–4 were built before git existed, so `phase-4` is the first real
 > tagged snapshot. Earlier per-phase snapshots can be **reconstructed on request**
 > (the file list above records what each phase contained).
+
+### Testing
+
+```bash
+python tests/run_all.py        # 167 checks, mocked Qwen + hardware, runs anywhere
+python tools/qwen_check.py     # on the Pi: real Qwen on tricky messages, no hardware
+```
 
 ### Workflow going forward
 1. Build the phase.

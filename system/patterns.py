@@ -47,6 +47,8 @@ MIN_CONFIDENCE = 0.6      # floor: happened on at least 60% of matching days
 MAX_PER_SLOT = 3          # keep the prompt small so Qwen doesn't get confused
 MERGE_MIN = 30            # device groups this close in time = one habit
 LEAVE_WINDOW_MIN = 10     # command + room empty within 10 min = leaving
+FEELING_WINDOW_MIN = 10   # changes within 10 min of a "feeling" request = what they chose
+MIN_FEELING_COUNT = 2     # a feeling preference needs this many occurrences
 FAN_GAP = 25              # fan speeds further apart than this = different group
 FAN_SPAN = 40             # ...and one group never spans more than this
 
@@ -254,6 +256,58 @@ def compute_patterns() -> list:
     return sorted(habits, key=lambda h: (h["day_type"], order[h["slot"]], h["valid_from"]))
 
 
+def compute_preferences() -> list:
+    """What the user ends up choosing when they mention a feeling.
+
+    For each request with a feeling (e.g. "I'm sad"), take the room state the
+    user settled on in the next FEELING_WINDOW_MIN minutes, i.e. Qwen's choice
+    plus any correction ("no, make it blue"). Then, per feeling, keep the most
+    common outcome. Learned from the user's own choices, not a fixed table.
+    """
+    with _conn() as c:
+        cmds = c.execute(
+            "SELECT id, ts, feeling FROM events WHERE kind = 'command'"
+            " AND source = 'user' AND feeling IS NOT NULL ORDER BY ts"
+        ).fetchall()
+        acts = c.execute(
+            "SELECT ts, parent_id, tool, args FROM events"
+            " WHERE kind = 'action' AND source = 'user' ORDER BY ts, id"
+        ).fetchall()
+    acts = [(datetime.fromisoformat(a["ts"]), a["parent_id"], a["tool"], json.loads(a["args"] or "{}"))
+            for a in acts]
+
+    outcomes = defaultdict(list)                  # feeling -> [{device: value}]
+    for cmd in cmds:
+        start = datetime.fromisoformat(cmd["ts"])
+        end = start + timedelta(minutes=FEELING_WINDOW_MIN)
+        final = {}
+        for ts, parent, tool, args in acts:
+            if parent == cmd["id"] or start < ts <= end:
+                if tool == "set_fan":
+                    final["fan"] = int(args.get("speed", 100)) if args.get("on", True) else 0
+                elif tool == "set_led":
+                    final["led"] = args.get("color")
+        if final:
+            outcomes[cmd["feeling"]].append(final)
+
+    prefs = []
+    for feeling, outs in outcomes.items():
+        if len(outs) < MIN_FEELING_COUNT:
+            continue
+        actions = []
+        fans = [o["fan"] for o in outs if "fan" in o]
+        if len(fans) >= len(outs) / 2:
+            on = [f for f in fans if f > 0]
+            actions.append({"tool": "set_fan", "args": {"on": True, "speed": int(statistics.median(on))}}
+                           if len(on) >= len(fans) / 2 else {"tool": "set_fan", "args": {"on": False}})
+        leds = [o["led"] for o in outs if "led" in o]
+        if len(leds) >= len(outs) / 2:
+            actions.append({"tool": "set_led", "args": {"color": Counter(leds).most_common(1)[0][0]}})
+        if actions:
+            prefs.append({"feeling": feeling, "actions": actions, "count": len(outs)})
+    return sorted(prefs, key=lambda p: -p["count"])
+
+
 def merge_runtime(new: list, old: list) -> list:
     """Carry approvals / rejections / disabled / today's asks over from the old file."""
     old_by_id = {p["id"]: p for p in old}
@@ -274,12 +328,24 @@ def load_patterns(path=None) -> list:
     return [p for p in json.loads(path.read_text())["patterns"] if "valid_from" in p]
 
 
-def save_patterns(patterns: list, path=None):
-    """Atomic write: a crash mid-write can't leave a half-written file."""
+def load_preferences(path=None) -> list:
+    """Feeling preferences from patterns.json ([] if none yet)."""
     path = Path(path or PATTERNS_JSON)
+    if not path.exists():
+        return []
+    return json.loads(path.read_text()).get("preferences", [])
+
+
+def save_patterns(patterns: list, path=None, preferences: list = None):
+    """Atomic write: a crash mid-write can't leave a half-written file.
+    preferences=None keeps the ones already in the file."""
+    path = Path(path or PATTERNS_JSON)
+    if preferences is None:
+        preferences = load_preferences(path)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(
-        {"updated": datetime.now().isoformat(timespec="seconds"), "patterns": patterns},
+        {"updated": datetime.now().isoformat(timespec="seconds"),
+         "patterns": patterns, "preferences": preferences},
         indent=2,
     ))
     os.replace(tmp, path)
@@ -404,7 +470,31 @@ def now_context(patterns: list, now: datetime, state: dict) -> str:
         start, p = nxt
         lines.append(f"Next habit: from {start:%A %H:%M} (usually around {p['typical_time']}): "
                      f"{describe(p)}.")
+    prefs = load_preferences()
+    if prefs:
+        lines.append("What the user chose before when feeling: " + "; ".join(
+            f"{x['feeling']} -> {describe_actions(x['actions'])} ({x['count']} times)" for x in prefs) + ".")
+    else:
+        lines.append("What the user chose before when feeling: nothing recorded yet.")
     return "\n".join(lines)
+
+
+def profile_text(patterns: list, prefs: list) -> str:
+    """Accurate plain-English profile for patterns.txt, built from the data
+    (no LLM, so it can't contain made-up facts)."""
+    out = []
+    for day_type, title in (("weekday", "Weekdays"), ("weekend", "Weekends")):
+        rows = [p for p in patterns if p["day_type"] == day_type]
+        if rows:
+            out.append(f"{title}:")
+            out += [f"- {p['window']} (usually ~{p['typical_time']}): {describe_actions(p['actions'])}"
+                    + (f" [{p['intent'].replace('_', ' ')}," if p["intent"] != "habit" else " [")
+                    + f" {p['confidence']:.0%} of {day_type}s]"
+                    for p in rows]
+    if prefs:
+        out.append("When the user mentions a feeling, they usually choose:")
+        out += [f"- {x['feeling']}: {describe_actions(x['actions'])} ({x['count']} times)" for x in prefs]
+    return "\n".join(out) if out else "No learned habits yet."
 
 
 def pattern_lines(patterns: list) -> str:

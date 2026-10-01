@@ -1,19 +1,21 @@
 """
-Build patterns.json and patterns.txt from the labeled commands in events.db.
+Build patterns.json and patterns.txt from events.db.
 
 Run by hand after update_intents.py (or run learn.py, which does both):
-    python update_patterns.py
+    python update_patterns.py             # habits + feeling preferences
+    python update_patterns.py --summary   # also ask Qwen for a readable summary
 
-1. Statistics: group user commands by weekday/weekend + slot + intent, weight
-   the last 3 weeks double, drop weak ones, keep max 3 per slot.
-2. Keep the runtime fields (approvals, rejections, disabled, last_fired) from
-   the previous patterns.json, so your past answers aren't forgotten.
-3. Write patterns.json (for code).
-4. Ask Qwen to describe the habits and intent in plain English and write
-   patterns.txt (for the agent's prompt). If Qwen is unreachable, a plain
-   summary is written instead.
+1. Habits: what the user does per weekday/weekend + time slot (see
+   system/patterns.py). Runtime answers (approvals, rejections, ...) are kept.
+2. Feeling preferences: what the user ends up choosing when they say they are
+   sad / stressed / ... (learned from their own choices and corrections).
+3. patterns.json (for code) and patterns.txt (for Qwen's prompt). patterns.txt
+   is built straight from the data, so it can't contain made-up facts.
+4. --summary: Qwen writes patterns_summary.txt, a friendly paragraph for you to
+   read. It is NOT used by the agent (a 3B model mixes facts up).
 """
 
+import sys
 import time
 from datetime import datetime
 
@@ -24,6 +26,7 @@ from system import patterns as pt
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen2.5:3b"
+SUMMARY_TXT = pt.ROOT / "patterns_summary.txt"
 
 PROMPT = """These are habits learned from how one person uses their smart home
 (a fan and an RGB light). Each line: when it happens, what they do, and a label
@@ -55,30 +58,32 @@ def ask_qwen_profile(lines: str) -> str:
 
 def main():
     init_db()
+    summary = "--summary" in sys.argv
 
-    print("[1/3] Computing patterns from events.db...")
+    print("[1/3] Learning habits and feeling preferences from events.db...")
     patterns = pt.merge_runtime(pt.compute_patterns(), pt.load_patterns())
-    if not patterns:
-        print("No patterns yet. Run update_intents.py first, or use the system longer.")
+    prefs = pt.compute_preferences()
+    if not patterns and not prefs:
+        print("Nothing learned yet. Run update_intents.py first, or use the system longer.")
         return
 
-    print(f"[2/3] Writing {pt.PATTERNS_JSON.name} ({len(patterns)} patterns):")
-    pt.save_patterns(patterns)
-    lines = pt.pattern_lines(patterns)
-    print(lines)
+    print(f"[2/3] Writing {pt.PATTERNS_JSON.name} ({len(patterns)} habits, "
+          f"{len(prefs)} feeling preferences) and {pt.PATTERNS_TXT.name}")
+    pt.save_patterns(patterns, preferences=prefs)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    pt.PATTERNS_TXT.write_text(f"Learned habits (updated {stamp}):\n{pt.profile_text(patterns, prefs)}\n")
+    print(f"\n{pt.PATTERNS_TXT.read_text()}")
 
-    print(f"\n[3/3] Asking Qwen to write {pt.PATTERNS_TXT.name} (can take a few minutes on the Pi)...")
+    if not summary:
+        print("[3/3] Skipped Qwen summary (add --summary for a readable paragraph).")
+        return
+    print(f"[3/3] Asking Qwen for {SUMMARY_TXT.name} (can take a few minutes on the Pi)...")
     t0 = time.monotonic()
     try:
-        profile = ask_qwen_profile(lines)
-        print(f"  done in {time.monotonic() - t0:.0f}s")
+        SUMMARY_TXT.write_text(ask_qwen_profile(pt.pattern_lines(patterns)) + "\n")
+        print(f"  done in {time.monotonic() - t0:.0f}s\n{SUMMARY_TXT.read_text()}")
     except requests.RequestException as e:
-        print(f"  Qwen unreachable ({e}); writing the plain summary instead.")
-        profile = lines
-
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    pt.PATTERNS_TXT.write_text(f"Learned habits (updated {stamp}):\n{profile}\n")
-    print(f"\n{pt.PATTERNS_TXT.name}:\n{pt.PATTERNS_TXT.read_text()}")
+        print(f"  Qwen unreachable ({e}); no summary written.")
 
 
 if __name__ == "__main__":

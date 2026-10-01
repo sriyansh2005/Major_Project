@@ -26,6 +26,8 @@ from system.behaviour_log import (
     add_intent,
     uncategorized_commands,
     set_intent,
+    set_feeling,
+    known_feelings,
 )
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -42,11 +44,16 @@ Rules:
   one-sentence description.
 - Use the time slot: "lights off" at night is usually sleep_prep, in the early
   morning it is usually leaving.
+- Also note the user's FEELING if they express one ("I'm sad" -> sad, "so
+  stressed" -> stressed, "I'm hot" -> hot). One lowercase word, reusing a
+  KNOWN feeling when it fits. Use null if no feeling is expressed.
 
 Reply with JSON only, in this shape:
-{"labels": [{"n": 1, "intent": "cooling"}],
+{"labels": [{"n": 1, "intent": "cooling", "feeling": null}],
  "new_intents": [{"name": "x", "description": "y"}]}
 "new_intents" is an empty list if you reused existing intents."""
+
+NO_FEELING = {"", "none", "null", "neutral", "no", "n_a", "na"}
 
 
 def clean_name(name: str) -> str:
@@ -62,7 +69,9 @@ def ask(items: list, intents: list) -> dict:
             f'{n}. said "{it["utterance"]}" | {it["day_type"]} {it["slot"]} | '
             f"room before {json.dumps(it['before'])} | actions: {acts}"
         )
-    user = f"EXISTING intents:\n{existing}\n\nItems:\n" + "\n".join(lines)
+    feelings = ", ".join(known_feelings()) or "none yet"
+    user = (f"EXISTING intents:\n{existing}\n\nKNOWN feelings: {feelings}\n\n"
+            "Items:\n" + "\n".join(lines))
 
     resp = requests.post(
         OLLAMA_URL,
@@ -135,8 +144,13 @@ def main():
                 known[name] = add_intent(name, new_desc.get(name, "Created by Qwen."))
                 print(f"  new intent: {name}")
             set_intent(ids_for[id(item)], known[name])
+            feeling = clean_name(str(lab.get("feeling") or ""))
+            if feeling not in NO_FEELING:
+                for cid in ids_for[id(item)]:
+                    set_feeling(cid, feeling)
             labeled += len(ids_for[id(item)])
-            print(f'  "{item["utterance"]}" ({item["day_type"]} {item["slot"]}) -> {name}')
+            extra = f", feeling {feeling}" if feeling not in NO_FEELING else ""
+            print(f'  "{item["utterance"]}" ({item["day_type"]} {item["slot"]}) -> {name}{extra}')
 
         done = min(b + BATCH_SIZE, len(uniques))
         elapsed = time.monotonic() - start
