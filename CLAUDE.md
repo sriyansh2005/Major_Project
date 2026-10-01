@@ -50,9 +50,14 @@ can have a single owner); the agent sends requests through a shared SQLite queue
 - **PIR path:** sustained motion ≥ 5 s → controller auto-sets fan 50% + LED
   yellow. No motion for `AWAY_SECONDS` (default 60) → person left → fan + LED
   turn off. Coming back re-applies the yellow default.
-- **Agent path:** you type a command → Qwen picks a tool → the agent writes a
-  row into the `commands` table → the controller applies it (~20×/sec poll) →
-  hardware moves.
+- **Agent path:** you type a command → the agent writes a row into the
+  `commands` table → the controller applies it (~20×/sec poll) → hardware moves.
+  **Your direct request always wins:** clear commands ("start the fan", "fan 60",
+  "light blue", "turn off the light and start the fan") are read by
+  `system/commands.py` and run instantly without Qwen. Vague ones ("I'm hot",
+  "as usual", "make it cosy") go to Qwen, which is told never to refuse a request
+  and, if it says it changed something without calling a tool, is reminded once.
+  Habits are background only; with no habit for right now, Qwen asks you.
 - **Priority:** an agent command sets `manual_override` for that visit, so the
   PIR will not overwrite your chosen colour/speed. The override clears when you
   leave (away-timeout).
@@ -76,6 +81,7 @@ Major-project/
 ├── system/                # brain + storage (GPIO-free)
 │   ├── tool_schemas.py     #   LLM tool definitions
 │   ├── behaviour_log.py    #   SQLite schema: events, intents, state, commands
+│   ├── commands.py         #   reads clear commands ("start the fan") without Qwen
 │   └── patterns.py         #   habit statistics, patterns.json I/O, ask/auto rules
 ├── data/
 │   └── synthetic_events.db #   4 weeks of fake user behaviour for testing

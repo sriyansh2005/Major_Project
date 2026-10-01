@@ -12,6 +12,7 @@ chat or, for habits you've approved enough times, does it and tells you.
 """
 
 import json
+import re
 import sys
 import threading
 import time
@@ -19,6 +20,7 @@ from datetime import datetime
 
 import requests
 
+from system import commands
 from system import patterns as pt
 from system.tool_schemas import TOOLS
 from system.behaviour_log import (
@@ -44,17 +46,27 @@ MAX_HISTORY = 12          # chat turns kept in the prompt (keeps Qwen fast)
 TOOL_NAMES = {"set_fan", "set_led"}
 
 SYSTEM_PROMPT = (
-    "You are a home assistant on a Raspberry Pi controlling a fan and an RGB LED. "
-    "Use set_fan to change the fan (speed 0-100; 'half'=50, 'low'~30, 'high'=100). "
-    "Use set_led to change the LED colour (red, green, blue, yellow, cyan, "
-    "purple, white, off). Only call a tool when hardware action is needed; "
-    "otherwise reply in one or two friendly sentences.\n"
-    "Each user message starts with the current time, the room state, the user's "
-    "habit for right now and the next habit. Use them. If the user says things "
-    "like 'as usual', 'my usual' or 'according to my pattern', do the habit for "
-    "right now; if there is none, do the next habit and say which one. Never "
-    "invent a habit that is not listed."
+    "You are a home assistant on a Raspberry Pi controlling a fan and an RGB LED.\n"
+    "Tools: set_fan (on/off, speed 0-100: low=30, half=50, high=100) and "
+    "set_led (red, green, blue, yellow, cyan, purple, magenta, white, off).\n"
+    "Rules, in this order:\n"
+    "1. The user's direct request always wins. If they ask to change the fan or "
+    "the light, call the tool and do exactly that, right now, whatever their "
+    "habits or the time of day. Never refuse, delay or argue.\n"
+    "2. To change anything you MUST call a tool. Never say you changed "
+    "something without calling the tool.\n"
+    "3. Habits are background only. Use them only when the user asks for 'the "
+    "usual', 'as usual', 'my pattern' or is vague ('I'm hot'). If there is no "
+    "habit for right now, ask the user what they would like. Never invent a "
+    "habit that is not listed.\n"
+    "4. Otherwise reply in one or two short, friendly sentences."
 )
+
+NUDGE = ("You described a change but did not call a tool, so nothing happened. "
+         "If the user wants a change, call set_fan / set_led now. Otherwise just reply.")
+CLAIMS_ACTION = re.compile(
+    r"\b(i'?ll|i will|i'?ve|i have|setting|turning|switching|starting|now)\b.*\b(fan|light|led)\b"
+    r"|\b(fan|light|led)\b.*\b(set to|turned|switched|is now)\b")
 
 # Plain answers to a suggestion are handled without Qwen (fast and can't be misread).
 YES = {"yes", "yeah", "yea", "yep", "yup", "ya", "ok", "okay", "sure", "do it",
@@ -121,22 +133,47 @@ def trim(history: list):
 def with_context(text: str) -> dict:
     """The user's message, prefixed with what's true right now."""
     ctx = pt.now_context(pt.load_patterns(), now(), get_state())
-    return {"role": "user", "content": f"{ctx}\n\nUser says: {text}"}
+    return {"role": "user", "content": (
+        "Background (habits only matter for 'as usual' requests; a direct "
+        f"request always wins):\n{ctx}\n\nUser says: {text}")}
+
+
+def ask_with_retry(messages: list) -> tuple:
+    """Ask Qwen; if it claims a change but called no tool, remind it once."""
+    msg = ask_qwen(messages)
+    calls = tool_calls(msg)
+    content = (msg.get("content") or "").lower()
+    if not calls and CLAIMS_ACTION.search(content):
+        msg = ask_qwen(messages + [{"role": "assistant", "content": msg.get("content") or ""},
+                                   {"role": "user", "content": NUDGE}])
+        calls = tool_calls(msg)
+    return msg, calls
 
 
 def handle(user_text: str, history: list) -> str:
     """One turn: log the user's words, let Qwen pick tools, queue them."""
-    cmd_id = log_command(user_text, get_state())
+    state = get_state()
+    cmd_id = log_command(user_text, state)
     history.append({"role": "user", "content": user_text})
     trim(history)
-    # History keeps the plain text; only this call gets the live context.
-    msg = ask_qwen(history[:-1] + [with_context(user_text)])
+
+    # 1) A clear direct command runs right away, no Qwen needed.
+    direct, sure = commands.parse(user_text, state)
+    if sure:
+        history.append({"role": "assistant", "content": "Done."})
+        return "Done: " + "; ".join(queue(direct, cmd_id, "user"))
+
+    # 2) Otherwise Qwen decides (history keeps the plain text; only this call
+    #    gets the live context).
+    msg, calls = ask_with_retry(history[:-1] + [with_context(user_text)])
     history.append({"role": "assistant", "content": msg.get("content") or ""})
 
-    calls = tool_calls(msg)
+    # 3) Safety net: Qwen did nothing, but part of the message was clear.
+    if not calls and direct:
+        calls = direct
     if not calls:
         return msg.get("content") or "(no reply)"
-    return "Queued: " + "; ".join(queue(calls, cmd_id, "user"))
+    return "Done: " + "; ".join(queue(calls, cmd_id, "user"))
 
 
 # --- Proactive suggestions ---------------------------------------------------
@@ -255,13 +292,19 @@ def answer_suggestion(reply: str, sug: dict, history: list) -> str:
             return f"Okay, leaving it. I'll ask again in {REASK_MIN} min."
         return "Okay, leaving it. I won't ask again today."
 
-    # Anything else ("no, make it blue") -> let Qwen work out what they want.
-    msg = ask_qwen([
-        {"role": "system", "content": build_system_prompt() + "\n\n" + ANSWER_RULES.format(
-            question=sug["question"], actions=pt.describe_actions(p["actions"]))},
-        with_context(reply),
-    ])
-    calls = tool_calls(msg)
+    # A clear direct command ("no, fan 60") is done exactly, no Qwen needed.
+    direct, sure = commands.parse(reply, get_state())
+    if sure:
+        msg, calls = {"content": ""}, direct
+    else:
+        # Anything else ("no, make it cosy") -> let Qwen work out what they want.
+        msg, calls = ask_with_retry([
+            {"role": "system", "content": build_system_prompt() + "\n\n" + ANSWER_RULES.format(
+                question=sug["question"], actions=pt.describe_actions(p["actions"]))},
+            with_context(reply),
+        ])
+        if not calls and direct:
+            calls = direct
 
     if not calls:
         declined()

@@ -103,7 +103,7 @@ TIME_PROMPT = ('Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00", '
 def parse_when(text: str, ref: datetime):
     """'2026-10-03 23:00' or 'sat 23:00' (next such day from ref) -> datetime.
     Empty / 'real' -> None (use the real clock)."""
-    text = text.strip().lower()
+    text = text.strip().strip("\"'").strip().lower()
     if text in ("", "real"):
         return None
     try:
