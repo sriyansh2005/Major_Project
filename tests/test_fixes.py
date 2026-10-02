@@ -132,8 +132,9 @@ check("'warm' -> yellow, fan 0 -> off",
 print("\nF3  no change when no change is wanted")
 out, q, _ = run("is the fan on?", [form(None, None, None, "Yes, it's at 80%.")])
 check("question -> just a reply, nothing changes", q == [] and out == "Yes, it's at 80%.", (out, q))
-out, q, _ = run("as usual", [form(None, None, None, "There's no habit for right now. What would you like?")])
-check("'as usual' with no habit -> asks, nothing changes", q == [] and "What would you like" in out, (out, q))
+out, q, _ = run("as usual", [])
+check("'as usual' at Tue 18:40 (fan 80 already) -> 'already your usual', no Qwen",
+      q == [] and "already" in out and not calls, (out, q))
 out, q, _ = run("fan 60 and make it cosy", [form(None, None, None, "Sure.")])
 check("Qwen does nothing -> clear part (fan 60) still runs", q == [("set_fan", {"on": True, "speed": 60}, "user")], q)
 

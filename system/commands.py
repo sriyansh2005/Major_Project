@@ -100,3 +100,18 @@ def parse(text: str, state: dict):
         else:
             sure = False                  # part of the message wasn't a clear command
     return list(actions.items()), sure and bool(actions)
+
+
+USUAL = (r"\b(as usual|the usual|my usual|like usual|like always|as always|"
+         r"(my|the) (pattern|routine|habit)s?|according to (the|my) (pattern|routine|habit)s?)\b")
+
+
+def is_usual(text: str) -> bool:
+    """'do it as usual', 'according to my pattern' -- with no specific device
+    request mixed in ('as usual but blue light' goes to Qwen instead)."""
+    text = text.lower()
+    if not re.search(USUAL, text):
+        return False
+    words = set(re.findall(r"[a-z']+", text))
+    return not (words & FAN_WORDS or words & LIGHT_WORDS
+                or any(re.search(rf"\b{c}\b", text) for c in COLORS))

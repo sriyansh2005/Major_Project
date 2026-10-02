@@ -238,10 +238,10 @@ def qwen_cmd(messages, schema=None):
 agent.ask_qwen = qwen_cmd
 bl.set_sim_time(datetime(2026, 10, 3, 23, 0))
 hist = [{"role": "system", "content": "sys"}]
-agent.handle("do according to the pattern", hist)
+agent.handle("set things up for me", hist)
 last = seen["msgs"][-1]["content"]
-check("normal command: Qwen gets Saturday 23:00 + next habit", "Saturday" in last and "Next habit" in last and last.endswith("User says: do according to the pattern"))
-check("history keeps your plain words (no context bloat)", hist[1]["content"] == "do according to the pattern")
+check("normal command: Qwen gets Saturday 23:00 + next habit", "Saturday" in last and "Next habit" in last and last.endswith("User says: set things up for me"))
+check("history keeps your plain words (no context bloat)", hist[1]["content"] == "set things up for me")
 pending_cmds()
 
 agent.ask_qwen = no_qwen

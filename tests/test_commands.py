@@ -149,7 +149,7 @@ def capture(messages, schema=None):
                        "reply": "There's no habit for right now. What would you like?"})
 
 
-out, q = run("do according to the pattern", capture)
+out, q = run("what should we do now", capture)
 system = seen["m"][0]["content"]
 user = seen["m"][-1]["content"]
 check("prompt says a direct request always wins", "direct request always wins" in system)

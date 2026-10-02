@@ -75,7 +75,9 @@ CASES = [
     (datetime(2026, 10, 6, 18, 40), (True, 80, "white"), "i am feeling sad set the mood of the room",
      "light or fan changes, feeling = sad", lambda r: bool(r) and feeling() == "sad"),
     (datetime(2026, 10, 6, 18, 40), (True, 80, "white"), "Led is white yet",
-     "light changes to something other than white", lambda r: led(r) not in (None, "white")),
+     "light changes to something other than white", lambda r: led(r) not in (None, "white"),
+     # like your real chat: the previous turn claimed purple but nothing changed
+     [("user", "set the room lighting as I am sad"), ("assistant", "Set the LED to purple.")]),
     (datetime(2026, 10, 6, 18, 40), (True, 80, "blue"), "make led light warm",
      "light yellow", lambda r: led(r) == "yellow"),
     (datetime(2026, 10, 6, 18, 40), (True, 80, "white"), "I am sad change the led colour to a sad mood",
@@ -85,7 +87,7 @@ CASES = [
     (datetime(2026, 10, 6, 18, 40), (True, 80, "white"), "is the fan on?",
      "nothing changes (just a reply)", lambda r: r == []),
     (datetime(2026, 10, 5, 12, 50), (False, 0, "off"), "do according to the pattern",
-     "Mon 12:50 has no habit: nothing changes, it asks", lambda r: r == []),
+     "Mon 12:50 has no habit: nothing changes, it asks (no Qwen)", lambda r: r == []),
     (datetime(2026, 10, 6, 18, 40), (False, 0, "off"), "do it as usual",
      "Tue evening habit: fan around 80%", lambda r: 60 <= (fan(r) or 0) <= 100),
     (datetime(2026, 10, 6, 18, 40), (False, 0, "off"), "start the fan",
@@ -96,11 +98,12 @@ PREF_CASE = (datetime(2026, 10, 7, 20, 0), (True, 50, "white"), "feeling sad aga
              "uses your learned preference: light blue", lambda r: led(r) == "blue")
 
 
-def run(clock, state, text, expect, check):
+def run(clock, state, text, expect, check, before=()):
     bl.set_sim_time(clock)
     bl.set_state(*state)
     bl.set_presence(True)
     hist = [{"role": "system", "content": agent.build_system_prompt()}]
+    hist += [{"role": role, "content": content} for role, content in before]
     t0 = time.monotonic()
     try:
         reply = agent.handle(text, hist)
@@ -118,6 +121,7 @@ def run(clock, state, text, expect, check):
 
 def main():
     print(f"Testing real Qwen ({agent.MODEL}) on a copy of {src.name} in {tmp}")
+    agent.warm_up()                              # same as agent.py does at start
     results = [run(*c) for c in CASES]
 
     # Teach a preference (sad -> blue, twice), then see if Qwen follows it.

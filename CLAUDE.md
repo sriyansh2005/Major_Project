@@ -59,8 +59,14 @@ can have a single owner); the agent sends requests through a shared SQLite queue
   go to Qwen, which answers by filling in a **JSON form** `{light, fan, feeling,
   reply}` (Ollama forces valid JSON). A 3B model fills a form far more reliably
   than it makes tool calls. If the reply claims a change but the form is empty,
-  Qwen is asked once more. Habits are background only; with no habit for right
-  now, Qwen asks you.
+  Qwen is asked once more. Values that are already set are dropped (no fake
+  "changes"). Habits are background only; Qwen is told about the next habit
+  only if it starts within 60 min.
+- **"As usual" / "my pattern"** is handled in code, not Qwen: it applies the
+  habit for right now, or says there isn't one (naming the next) and asks.
+- **Speed on the Pi:** the agent warms Qwen up at start, keeps the model loaded
+  (`keep_alive` 60 min), allows 300 s per call, keeps the system prompt short
+  and identical (live facts go with each message) and the history to 6 turns.
 - **Feelings (learned, not a fixed table):** when you mention a feeling, Qwen
   records it (`events.feeling`) and picks a setting. Whatever you end up with in
   the next 10 min (its choice plus your corrections) becomes your preference for
@@ -284,7 +290,7 @@ git checkout main           # return to latest
 ### Testing
 
 ```bash
-python tests/run_all.py        # 167 checks, mocked Qwen + hardware, runs anywhere
+python tests/run_all.py        # 190 checks, mocked Qwen + hardware, runs anywhere
 python tools/qwen_check.py     # on the Pi: real Qwen on tricky messages, no hardware
 ```
 

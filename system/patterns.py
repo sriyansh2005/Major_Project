@@ -49,6 +49,7 @@ MERGE_MIN = 30            # device groups this close in time = one habit
 LEAVE_WINDOW_MIN = 10     # command + room empty within 10 min = leaving
 FEELING_WINDOW_MIN = 10   # changes within 10 min of a "feeling" request = what they chose
 MIN_FEELING_COUNT = 2     # a feeling preference needs this many occurrences
+NEXT_HABIT_MIN = 60       # only tell Qwen about the next habit if it starts this soon
 FAN_GAP = 25              # fan speeds further apart than this = different group
 FAN_SPAN = 40             # ...and one group never spans more than this
 
@@ -464,9 +465,11 @@ def now_context(patterns: list, now: datetime, state: dict) -> str:
     ]
     cur = habit_now(patterns, now)
     lines.append(f"User's habit for right now: {describe(cur)}." if cur
-                 else "User's habit for right now: none.")
+                 else "User's habit for right now: none (do not apply any habit).")
     nxt = next_habit(patterns, now)
-    if nxt:
+    # Only mention the next habit if it is close, so a habit hours away isn't
+    # mistaken for "now" by the small model.
+    if nxt and nxt[0] - now <= timedelta(minutes=NEXT_HABIT_MIN):
         start, p = nxt
         lines.append(f"Next habit: from {start:%A %H:%M} (usually around {p['typical_time']}): "
                      f"{describe(p)}.")
@@ -487,10 +490,10 @@ def profile_text(patterns: list, prefs: list) -> str:
         rows = [p for p in patterns if p["day_type"] == day_type]
         if rows:
             out.append(f"{title}:")
-            out += [f"- {p['window']} (usually ~{p['typical_time']}): {describe_actions(p['actions'])}"
-                    + (f" [{p['intent'].replace('_', ' ')}," if p["intent"] != "habit" else " [")
-                    + f" {p['confidence']:.0%} of {day_type}s]"
-                    for p in rows]
+            for p in rows:
+                why = f"{p['intent'].replace('_', ' ')}, " if p["intent"] != "habit" else ""
+                out.append(f"- {p['window']} (usually ~{p['typical_time']}): "
+                           f"{describe_actions(p['actions'])} [{why}{p['confidence']:.0%} of {day_type}s]")
     if prefs:
         out.append("When the user mentions a feeling, they usually choose:")
         out += [f"- {x['feeling']}: {describe_actions(x['actions'])} ({x['count']} times)" for x in prefs]

@@ -44,7 +44,9 @@ CHECK_EVERY = 30          # seconds between habit checks
 REASK_MIN = 5             # ask again after a "no" / no answer (set to 20 after testing)
 MAX_ASKS = 3              # per habit per day
 PENDING_TTL = REASK_MIN * 60   # an unanswered suggestion expires before the re-ask
-MAX_HISTORY = 12          # chat turns kept in the prompt (keeps Qwen fast)
+MAX_HISTORY = 6           # chat turns kept in the prompt (keeps Qwen fast on the Pi)
+QWEN_TIMEOUT = 300        # seconds; the Pi is slow, especially the first call
+KEEP_LOADED = "60m"       # keep the model in memory between messages
 
 SYSTEM_PROMPT = """You are a home assistant on a Raspberry Pi controlling a fan and an RGB light.
 Answer every message by filling in this JSON form:
@@ -104,19 +106,23 @@ pending = None            # the suggestion waiting for an answer
 # --- Qwen --------------------------------------------------------------------
 
 def build_system_prompt() -> str:
-    return f"{SYSTEM_PROMPT}\n\nWhat you know about this user:\n{pt.load_profile()}"
+    # Kept short and identical between calls: the Pi reads every prompt token,
+    # and Ollama can reuse a prompt start it has already read. The live facts
+    # (time, room, habit now, feelings) come with each message instead.
+    return SYSTEM_PROMPT
 
 
 def ask_qwen(messages: list, schema: dict = None) -> str:
     """One Qwen call via Ollama. With a schema the reply is forced to valid JSON."""
     payload = {"model": MODEL, "messages": messages, "stream": False,
-               "options": {"temperature": 0.2}}
+               "keep_alive": KEEP_LOADED,
+               "options": {"temperature": 0.2, "num_predict": 160}}
     if schema:
         payload["format"] = schema
-    resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
+    resp = requests.post(OLLAMA_URL, json=payload, timeout=QWEN_TIMEOUT)
     if schema and resp.status_code >= 400:      # Ollama can't use the schema: plain JSON mode
         payload["format"] = "json"
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=QWEN_TIMEOUT)
     resp.raise_for_status()
     return resp.json()["message"]["content"]
 
@@ -166,6 +172,34 @@ def decide(messages: list) -> dict:
     return d
 
 
+def warm_up():
+    """Load Qwen and read the system prompt once at start, so the user's
+    first message doesn't wait (or time out) on that."""
+    t0 = time.monotonic()
+    print("Loading Qwen (first time can take a minute on the Pi)...", flush=True)
+    try:
+        ask_qwen([{"role": "system", "content": build_system_prompt()},
+                  {"role": "user", "content": "User says: hello"}], DECISION_SCHEMA)
+        print(f"Qwen ready ({time.monotonic() - t0:.0f}s).")
+    except requests.RequestException as e:
+        print(f"Qwen didn't answer ({e}). Clear commands still work; is Ollama running?")
+
+
+def drop_noops(calls: list, state: dict) -> list:
+    """Remove 'changes' that set what the device already has (fan 80 -> 80)."""
+    out = []
+    for name, args in calls:
+        if name == "set_fan":
+            speed = args.get("speed", 100) if args.get("on", True) else 0
+            current = state["fan_speed"] if state["fan_on"] else 0
+            if speed == current:
+                continue
+        if name == "set_led" and args.get("color") == state["led"]:
+            continue
+        out.append((name, args))
+    return out
+
+
 def queue(calls: list, parent_id: int, source: str) -> list:
     done = []
     for name, args in calls:
@@ -204,18 +238,41 @@ def handle(user_text: str, history: list) -> str:
         history.append({"role": "assistant", "content": "Done."})
         return "Done: " + "; ".join(queue(direct, cmd_id, "user"))
 
-    # 2) Otherwise Qwen fills in the form (only this call gets the live context).
+    # 2) "As usual" / "my pattern": done from the learned habits, no Qwen.
+    if commands.is_usual(user_text):
+        reply = do_usual(cmd_id, state)
+        history.append({"role": "assistant", "content": reply})
+        return reply
+
+    # 3) Otherwise Qwen fills in the form (only this call gets the live context).
     d = decide(history[:-1] + [with_context(user_text)])
     if d["feeling"]:
         set_feeling(cmd_id, d["feeling"])
     history.append({"role": "assistant", "content": d["reply"] or "Okay."})
 
-    # 3) Safety net: Qwen changed nothing, but part of the message was clear.
-    calls = d["actions"] or direct
+    # 4) Drop values that are already set; if Qwen changed nothing but part of
+    #    the message was clear, do that part.
+    calls = drop_noops(d["actions"], state) or direct
     if not calls:
         return d["reply"] or "(no reply)"
     done = "Done: " + "; ".join(queue(calls, cmd_id, "user"))
     return f"{d['reply']}\n{done}" if d["reply"] else done
+
+
+def do_usual(cmd_id: int, state: dict) -> str:
+    """Apply the habit for right now, or say there isn't one and ask."""
+    patterns, clock = pt.load_patterns(), now()
+    habit = pt.habit_now(patterns, clock)
+    if habit:
+        calls = drop_noops([(a["tool"], a["args"]) for a in habit["actions"]], state)
+        if not calls:
+            return f"That's already your usual for now ({pt.describe_actions(habit['actions'])})."
+        queue(calls, cmd_id, "user")
+        return f"Your usual for now: {pt.describe_actions(habit['actions'])}."
+    nxt = pt.next_habit(patterns, clock)
+    later = (f" Your next one is {pt.describe_actions(nxt[1]['actions'])} from "
+             f"{nxt[0]:%A %H:%M}." if nxt else "")
+    return f"You don't have a usual setting for right now.{later} What would you like?"
 
 
 # --- Proactive suggestions ---------------------------------------------------
@@ -387,6 +444,7 @@ def main():
         print(handle(" ".join(sys.argv[1:]), history))
         return
 
+    warm_up()
     stop = threading.Event()
     threading.Thread(target=checker, args=(stop,), daemon=True).start()
     n = len(pt.load_patterns())
