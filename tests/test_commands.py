@@ -153,7 +153,7 @@ out, q = run("what should we do now", capture)
 system = seen["m"][0]["content"]
 user = seen["m"][-1]["content"]
 check("prompt says a direct request always wins", "direct request always wins" in system)
-check("prompt says: no habit now -> ask the user", "no habit for right now, ask what" in system)
+check("prompt says: usual request -> set usual, code applies it", 'set "usual"' in system and "Never invent a habit" in system)
 check("Qwen is told it's Monday 12:50 with no habit now",
       "Monday 2026-10-05 12:50" in user and "habit for right now: none" in user, user)
 check("nothing changes when there's no habit and Qwen asks", q == [] and "What would you like" in out, (out, q))
@@ -186,7 +186,7 @@ for name in ("devices.fan_control", "devices.led_control"):
     sys.modules[name] = m
 import controller  # noqa: E402
 ref = datetime(2026, 9, 30, 12, 0)
-check("'\"sat 23:00\"' works", controller.parse_when('"sat 23:00"', ref) == datetime(2026, 10, 3, 23, 0))
+check("'\"sat 23:00\"' works", controller.parse_when('"sat 23:00"', ref) == datetime(2026, 9, 26, 23, 0))
 check("\"'2026-10-03 23:00'\" works", controller.parse_when("'2026-10-03 23:00'", ref) == datetime(2026, 10, 3, 23, 0))
 bl.set_sim_time(None)
 

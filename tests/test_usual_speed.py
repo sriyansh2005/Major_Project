@@ -82,6 +82,14 @@ check("Tue 18:40: evening habit (fan 80%) applied, no Qwen", q == [("set_fan", {
 out, q = run("as usual", TUE_1840, (True, 80, "white"))
 check("habit already in place -> says so, nothing changes", q == [] and "already" in out, (out, q))
 
+said_usual = lambda m, schema=None: json.dumps({"light": None, "fan": None, "feeling": None,  # noqa: E731
+                                                "usual": True, "reply": "Sure."})
+check("'do what I always do at this time' is not in the rule list",
+      not commands.is_usual("do what I always do at this time"))
+out, q = run("do what I always do at this time", TUE_1840, (False, 0, "off"), said_usual)
+check("...Qwen marks it usual -> code applies the real habit (fan 80%)",
+      q == [("set_fan", {"on": True, "speed": 80})] and "usual" in out, (out, q))
+
 print("\nU2  values that are already set are dropped")
 same = lambda m, schema=None: json.dumps({"light": "white", "fan": 80, "feeling": None,  # noqa: E731
                                           "reply": "The fan is on at 80%."})

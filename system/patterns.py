@@ -11,7 +11,7 @@ How a habit is found
      Counting what the devices did (not Qwen's intent label) means a wrong
      label can't split one habit into pieces that each fall under the floor.
   3. Keep a group if it happened on >= MIN_CONFIDENCE of matching days
-     (last RECENT_DAYS count double) and >= MIN_COUNT times.
+     (recent weeks count more, see WEEK_WEIGHTS) and >= MIN_COUNT times.
   4. Groups in the same slot whose usual times are within MERGE_MIN become one
      habit ("light off + fan 30%"). Max MAX_PER_SLOT habits per slot.
   5. A habit is valid for its whole slot. If a slot has several, the slot is
@@ -40,8 +40,11 @@ PATTERNS_JSON = ROOT / "patterns.json"
 PATTERNS_TXT = ROOT / "patterns.txt"
 
 # Learning
-RECENT_DAYS = 21          # the last 3 weeks...
-RECENT_WEIGHT = 2.0       # ...count double
+# Recency: the last week counts most, then the week before, then the one
+# before that; anything older counts the same (the floor). Steps of 0.5,
+# one weight per week back from the most recent day of data.
+WEEK_WEIGHTS = [2.0, 1.5, 1.0]
+BASE_WEIGHT = 1.0
 MIN_COUNT = 3             # floor: seen at least this many times
 MIN_CONFIDENCE = 0.6      # floor: happened on at least 60% of matching days
 MAX_PER_SLOT = 3          # keep the prompt small so Qwen doesn't get confused
@@ -166,7 +169,8 @@ def compute_patterns() -> list:
     ref = max(o["date"] for o in occ)
 
     def weight(day):
-        return RECENT_WEIGHT if (ref - day).days < RECENT_DAYS else 1.0
+        wk = (ref - day).days // 7          # 0 = last week, 1 = week before, ...
+        return WEEK_WEIGHTS[wk] if wk < len(WEEK_WEIGHTS) else BASE_WEIGHT
 
     covered = defaultdict(float)                  # weighted weekdays / weekend days
     day = first

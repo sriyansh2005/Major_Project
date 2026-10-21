@@ -124,12 +124,11 @@ sys.modules["devices.led_control"] = leds
 import controller  # noqa: E402
 ref = datetime(2026, 9, 30, 12, 0)                      # a Wednesday
 check("'2026-10-03 23:00'", controller.parse_when("2026-10-03 23:00", ref) == datetime(2026, 10, 3, 23, 0))
-check("'sat 23:00' -> next Saturday", controller.parse_when("sat 23:00", ref) == datetime(2026, 10, 3, 23, 0))
-check("'Saturday 23:00' works too", controller.parse_when("Saturday 23:00", ref) == datetime(2026, 10, 3, 23, 0))
-check("'wed 22:30' -> same day (Wednesday)", controller.parse_when("wed 22:30", ref) == datetime(2026, 9, 30, 22, 30))
-check("'tue 07:00' -> next Tuesday", controller.parse_when("tue 07:00", ref) == datetime(2026, 10, 6, 7, 0))
-check("Enter -> real clock", controller.parse_when("", ref) is None)
-for bad in ["tomorrow", "sat", "25:99", "2026-13-01 10:00"]:
+check("'sat 23:00' -> previous Saturday", controller.parse_when("sat 23:00", ref) == datetime(2026, 9, 26, 23, 0))
+check("'Saturday 23:00' works too", controller.parse_when("Saturday 23:00", ref) == datetime(2026, 9, 26, 23, 0))
+check("'wed 22:30' -> previous week (Wednesday)", controller.parse_when("wed 22:30", ref) == datetime(2026, 9, 23, 22, 30))
+check("'tue 07:00' -> previous Tuesday", controller.parse_when("tue 07:00", ref) == datetime(2026, 9, 29, 7, 0))
+for bad in ["", "real", "tomorrow", "sat", "25:99", "2026-13-01 10:00"]:
     try:
         controller.parse_when(bad, ref)
         check(f"rejects '{bad}'", False)
@@ -140,9 +139,8 @@ with contextlib.redirect_stdout(io.StringIO()) as out:
     controller.set_clock("sat 23:00")
 check("set_clock moves the shared clock", bl.now().strftime("%a %H:%M") == "Sat 23:00", out.getvalue())
 with contextlib.redirect_stdout(io.StringIO()):
-    controller.set_clock("")
-check("Enter goes back to the real clock",
-      abs((bl.now() - datetime.now()).total_seconds()) < 2)
+    check("Enter is rejected (simulated clock only)", controller.set_clock("") is False)
+check("rejected input keeps the clock", bl.now().strftime("%a %H:%M") == "Sat 23:00")
 
 print("\n" + ("ALL PASSED" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 sys.exit(1 if FAILS else 0)

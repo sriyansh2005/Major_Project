@@ -71,13 +71,6 @@ def _conn():
 def init_db():
     """Create tables if they don't exist. Safe to call on every startup."""
     with _conn() as c:
-        cols = [r["name"] for r in c.execute("PRAGMA table_info(events)")]
-        if cols and "source" not in cols:
-            raise RuntimeError(
-                "events.db has the old (pre-Phase 6) schema. "
-                "Delete events.db and start again."
-            )
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS events (

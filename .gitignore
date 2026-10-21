@@ -18,3 +18,4 @@ patterns_summary.txt
 # Logs
 *.log
 motion_log.txt
+tests/

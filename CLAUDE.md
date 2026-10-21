@@ -62,8 +62,11 @@ can have a single owner); the agent sends requests through a shared SQLite queue
   Qwen is asked once more. Values that are already set are dropped (no fake
   "changes"). Habits are background only; Qwen is told about the next habit
   only if it starts within 60 min.
-- **"As usual" / "my pattern"** is handled in code, not Qwen: it applies the
-  habit for right now, or says there isn't one (naming the next) and asks.
+- **"As usual" / "my pattern"**: common phrasings are caught instantly by
+  `commands.is_usual`; any other wording ("do what I always do at this time")
+  is spotted by Qwen via a `"usual": true` field in its form. Either way, code
+  (`do_usual`) applies the real habit for right now, or says there isn't one
+  (naming the next) and asks. Qwen never picks the habit itself.
 - **Speed on the Pi:** the agent warms Qwen up at start, keeps the model loaded
   (`keep_alive` 60 min), allows 300 s per call, keeps the system prompt short
   and identical (live facts go with each message) and the history to 6 turns.
@@ -139,8 +142,7 @@ The two entry points stay at the root so you run them the same way
   `parent_id` linking back to the user's command row.
 - Learning uses **only `source='user'` rows**, so PIR defaults and future
   auto-actions never count as the user's habits.
-- WAL mode is on so both processes can use the DB at once. An old pre-Phase-6
-  `events.db` is rejected at startup; delete it.
+- WAL mode is on so both processes can use the DB at once.
 
 ### Labeling intents
 
@@ -234,10 +236,10 @@ source ~/major/venv/bin/activate && python agent.py
 `python controller.py` asks for a date/time when it starts:
 
 ```
-Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00", Enter = real time):
+Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00"):
 ```
 
-- Press **Enter** for the real clock (normal use).
+- A time is required: the system runs on the simulated clock only.
 - `sat 23:00` means the **next** Saturday from the current clock; use a full
   date for an exact day.
 - While it runs, type **`next`** to jump to a new date/time, **`time`** to see

@@ -208,8 +208,8 @@ txt = pt.PATTERNS_TXT.read_text()
 print("      " + txt.replace("\n", "\n      "))
 check("lists weekday bedtime correctly (fan 30% and light off, 22:20-23:59)",
       "22:20-23:59 (usually ~23:04): fan 30% and light off" in txt, txt)
-check("lists weekday relax correctly (21:00-22:19, light purple)",
-      "21:00-22:19 (usually ~21:35): light purple" in txt)
+check("lists weekday relax correctly (21:00-22:19, light blue)",
+      "21:00-22:19 (usually ~21:35): light blue" in txt)
 check("no Qwen call without --summary", "Skipped Qwen summary" in out.getvalue())
 check("patterns.json has a preferences list", "preferences" in json.loads(pt.PATTERNS_JSON.read_text()))
 

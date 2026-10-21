@@ -96,16 +96,13 @@ def apply_pending_commands():
 
 # --- Simulated clock (testing) -----------------------------------------------
 WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-TIME_PROMPT = ('Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00", '
-               'Enter = real time): ')
+TIME_PROMPT = 'Simulated date/time (e.g. "2026-10-03 23:00" or "sat 23:00"): '
 
 
 def parse_when(text: str, ref: datetime):
-    """'2026-10-03 23:00' or 'sat 23:00' (next such day from ref) -> datetime.
-    Empty / 'real' -> None (use the real clock)."""
+    """'2026-10-03 23:00' or 'sat 23:00' (that weekday in the PREVIOUS week,
+    so it lands on a day with recorded data) -> datetime."""
     text = text.strip().strip("\"'").strip().lower()
-    if text in ("", "real"):
-        return None
     try:
         return datetime.strptime(text, "%Y-%m-%d %H:%M")
     except ValueError:
@@ -114,8 +111,8 @@ def parse_when(text: str, ref: datetime):
     if day[:3] not in WEEKDAYS or not hm:
         raise ValueError(text)
     t = datetime.strptime(hm.strip(), "%H:%M")
-    ahead = (WEEKDAYS[day[:3]] - ref.weekday()) % 7
-    return (ref + timedelta(days=ahead)).replace(hour=t.hour, minute=t.minute,
+    back = (ref.weekday() - WEEKDAYS[day[:3]]) % 7 or 7   # most recent past such day
+    return (ref - timedelta(days=back)).replace(hour=t.hour, minute=t.minute,
                                                  second=0, microsecond=0)
 
 
@@ -127,8 +124,7 @@ def set_clock(text: str) -> bool:
         print("  Didn't understand that. Use 2026-10-03 23:00 or sat 23:00.")
         return False
     set_sim_time(start)
-    print(f"SIMULATED CLOCK: {start:%A %Y-%m-%d %H:%M}" if start
-          else "REAL CLOCK: " + datetime.now().strftime("%A %Y-%m-%d %H:%M"))
+    print(f"SIMULATED CLOCK: {start:%A %Y-%m-%d %H:%M}")
     return True
 
 
@@ -163,9 +159,9 @@ def main():
         if not set_clock(opts.time):
             sys.exit(1)
     elif interactive:
-        ask_clock()                      # Enter = real time
+        ask_clock()
     else:
-        print("REAL CLOCK (no terminal attached)")
+        sys.exit('No terminal attached: pass --time "YYYY-MM-DD HH:MM".')
     if interactive:
         print("Type 'next' any time to change the date/time, 'time' to see it.")
         threading.Thread(target=console, daemon=True).start()

@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 import requests
 
@@ -39,7 +40,7 @@ from system.behaviour_log import (
 
 # --- Config ------------------------------------------------------------------
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "qwen2.5:3b"
+MODEL = "qwen2.5:1.5b"
 CHECK_EVERY = 30          # seconds between habit checks
 REASK_MIN = 5             # ask again after a "no" / no answer (set to 20 after testing)
 MAX_ASKS = 3              # per habit per day
@@ -48,26 +49,7 @@ MAX_HISTORY = 6           # chat turns kept in the prompt (keeps Qwen fast on th
 QWEN_TIMEOUT = 300        # seconds; the Pi is slow, especially the first call
 KEEP_LOADED = "60m"       # keep the model in memory between messages
 
-SYSTEM_PROMPT = """You are a home assistant on a Raspberry Pi controlling a fan and an RGB light.
-Answer every message by filling in this JSON form:
-  "light":   one of red, green, blue, yellow, cyan, purple, magenta, white, off;
-             or null to leave the light as it is
-  "fan":     0 (off) to 100 (low=30, half=50, high=100); or null to leave it
-  "feeling": the user's feeling if they express one, one lowercase word
-             (sad, stressed, tired, happy, hot, cold, ...); else null
-  "reply":   one or two short, kind sentences to the user saying what you changed
-Rules, in this order:
-1. The user's direct request always wins. Set exactly what they ask, now,
-   whatever their habits or the time of day. Never refuse or delay.
-2. If they mention a feeling or a mood, change the room to suit it. If the
-   background lists what they chose before for that feeling, use that.
-   Otherwise choose what you think fits and say so; they can correct you.
-   The light cannot dim: "warm" means yellow, "cool" means blue or cyan.
-3. If they complain that something did not change, set it now.
-4. Habits are background only. Use them when they say "as usual", "my
-   pattern" or something vague. If there is no habit for right now, ask what
-   they would like and leave light and fan null. Never invent a habit.
-5. For questions or chat, leave light and fan null and just reply."""
+SYSTEM_PROMPT = (Path(__file__).parent / "agent_prompt.txt").read_text().strip()
 
 DECISION_SCHEMA = {
     "type": "object",
@@ -75,9 +57,10 @@ DECISION_SCHEMA = {
         "light": {"type": ["string", "null"]},
         "fan": {"type": ["integer", "null"]},
         "feeling": {"type": ["string", "null"]},
+        "usual": {"type": "boolean"},
         "reply": {"type": "string"},
     },
-    "required": ["light", "fan", "feeling", "reply"],
+    "required": ["light", "fan", "feeling", "usual", "reply"],
 }
 
 LIGHT_ALIAS = {**commands.COLOR_ALIAS, "warm": "yellow", "cool": "blue", "none": "off"}
@@ -142,6 +125,7 @@ def parse_decision(text: str) -> dict:
     feeling = re.sub(r"[^a-z]", "", str(data.get("feeling") or "").lower())
     return {"actions": actions,
             "feeling": None if feeling in ("", "none", "null", "neutral") else feeling,
+            "usual": data.get("usual") is True,
             "reply": str(data.get("reply") or "").strip()}
 
 
@@ -155,10 +139,10 @@ def decide(messages: list) -> dict:
         except (json.JSONDecodeError, AttributeError, TypeError):
             continue
     else:
-        return {"actions": [], "feeling": None, "reply": ""}
+        return {"actions": [], "feeling": None, "usual": False, "reply": ""}
 
     reply = d["reply"].lower()
-    if not d["actions"] and CLAIMS.search(reply) and DEVICE.search(reply):
+    if not d["actions"] and not d["usual"] and CLAIMS.search(reply) and DEVICE.search(reply):
         try:
             retry = parse_decision(ask_qwen(
                 messages + [{"role": "assistant", "content": json.dumps(
@@ -248,6 +232,10 @@ def handle(user_text: str, history: list) -> str:
     d = decide(history[:-1] + [with_context(user_text)])
     if d["feeling"]:
         set_feeling(cmd_id, d["feeling"])
+    if d["usual"]:                  # Qwen spotted "my usual" in other words; code applies the real habit
+        reply = do_usual(cmd_id, state)
+        history.append({"role": "assistant", "content": reply})
+        return reply
     history.append({"role": "assistant", "content": d["reply"] or "Okay."})
 
     # 4) Drop values that are already set; if Qwen changed nothing but part of
