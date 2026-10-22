@@ -129,6 +129,24 @@ def matches_expect(actions, expect):
 
 
 # --- Qwen-path metrics (Pi only) ---------------------------------------------
+def vague_ok(d, expect):
+    """Grade one vague reply against its loose expectation."""
+    got = {}
+    for tool, args in d["actions"]:
+        if tool == "set_fan":
+            got["fan_speed"] = 0 if not args.get("on") else args.get("speed")
+        elif tool == "set_led":
+            got["led"] = args.get("color")
+    if "usual" in expect:
+        return d["usual"] is True
+    if "light_family" in expect:
+        return FAM.get(got.get("led")) == expect["light_family"]
+    for k, v in expect.items():
+        if got.get(k) != v:
+            return False
+    return True
+
+
 def grade_qwen():
     import urllib.request
     try:
@@ -136,10 +154,33 @@ def grade_qwen():
     except Exception:
         print("=== QWEN PATH ===\n  no Ollama on localhost — skipped (run this on the Pi)\n")
         return
+
+    import agent
+    from system.behaviour_log import init_db
+    init_db()
+    ec = json.loads((ROOT / "tests/eval_commands.json").read_text())
+    vague = ec["vague"]
+
     print("=== QWEN PATH ===")
-    print("  Ollama reachable. Full scoring hook left for the Pi run.")
-    print("  (sends tests/eval_commands.json 'vague' items through agent.ask_qwen,")
-    print("   compares light/fan to 'expect', records latency.)\n")
+    print("  warming up Qwen...", flush=True)
+    agent.warm_up()
+
+    correct, times = 0, []
+    sysmsg = {"role": "system", "content": agent.build_system_prompt()}
+    for c in vague:
+        t0 = time.perf_counter()
+        d = agent.decide([sysmsg, agent.with_context(c["text"])])
+        times.append(time.perf_counter() - t0)
+        ok = vague_ok(d, c["expect"])
+        correct += ok
+        print(f"    {'OK ' if ok else 'MISS'}  {c['text']!r:28} -> {d['actions']} usual={d['usual']}")
+
+    n = len(vague)
+    times.sort()
+    median = times[len(times) // 2]
+    print(f"  action accuracy {correct}/{n} = {correct/n:.0%}")
+    print(f"  latency  median {median:.1f}s   worst {times[-1]:.1f}s")
+    print()
 
 
 if __name__ == "__main__":
