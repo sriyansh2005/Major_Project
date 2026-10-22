@@ -111,17 +111,37 @@ output and update the tables below._
 | Coverage | 100% (12 of 12) |
 | Accuracy | 100% (12 of 12) |
 | False-fire | 0 of 6 |
-| Latency | 0.57 ms/command |
+| Latency | ~0.4 ms/command |
 
 ### Qwen path (1.5B)
 | Metric | Result |
 |---|---|
-| Action accuracy | _pending Pi run_ |
-| Latency (median) | _pending_ |
-| Latency (worst) | _pending_ |
+| Action accuracy | 50% (3 of 6) |
+| Latency (median) | 28.6 s |
+| Latency (worst) | 67.4 s |
+| Warm-up (first load) | 114 s |
+
+Per-command:
+
+| Message | Result | Got | Verdict |
+|---|---|---|---|
+| "I'm hot" | OK | fan 100 + yellow | learned preference fired correctly |
+| "feeling warm" | OK | fan 50 + yellow | light yellow correct (extra fan harmless) |
+| "I'm cold" | MISS | fan 50 only | got the fan, dropped the white light |
+| "make it cosy" | MISS | fan 50 + yellow | answer key wanted calm; yellow (warm) is arguably fine |
+| "as usual" | OK | usual=True | routed to the habit correctly |
+| "I'm sad" | MISS | nothing | did nothing — a real miss |
 
 ### Notes / findings
-- **Lights learned, fans missed.** On 5 of 6 habits the learner got the colour
-  right but dropped the fan speed — worth investigating in the learner's fan grouping.
-- **Perfect instant path.** Clear commands all handled, zero false triggers.
-- **No invented habits** (precision 100%) — the system is safe to trust on what it claims.
+- **Lights learned, fans missed (habits).** On 5 of 6 habits the learner got the
+  colour right but dropped the fan speed — worth investigating in the learner's fan grouping.
+- **Perfect instant path.** Clear commands all handled, zero false triggers, sub-ms.
+- **No invented habits** (precision 100%) — safe to trust on what it claims.
+- **Learned feeling preferences work.** "I'm hot" → fan 100 and "feeling warm" →
+  yellow both fired from `patterns.txt`, proving the preference learning loop.
+- **1.5B is weak on open feelings.** "I'm sad" did nothing and "I'm cold" dropped
+  the light. Two of the three misses are the hardest, least-specified cases.
+- **Qwen is slow on the Pi** (median ~29 s, worst ~67 s). Acceptable for one-off
+  fuzzy messages, not for rapid back-and-forth. Clear commands bypass this entirely.
+- **Grading caveat:** the "vague" answer key is partly subjective ("cosy" → calm
+  vs warm is debatable), so treat Qwen-path accuracy as indicative, not exact.
