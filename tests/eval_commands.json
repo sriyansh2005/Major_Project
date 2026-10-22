@@ -1,0 +1,37 @@
+{
+  "_README": "Hand-labelled command test set. 'kind'=clear -> instant path (commands.parse must handle it); 'kind'=vague -> Qwen path (needs the model, Pi only); 'kind'=noncommand -> must NOT trigger any action. 'expect' is the final device intent: fan speed (0=off, null=leave) and light colour family or exact colour (null=leave).",
+
+  "clear": [
+    {"text": "start the fan",                         "expect": {"fan_on": true}},
+    {"text": "fan 60",                                 "expect": {"fan_speed": 60}},
+    {"text": "fan to 30",                              "expect": {"fan_speed": 30}},
+    {"text": "turn the fan off",                       "expect": {"fan_on": false}},
+    {"text": "max fan",                                "expect": {"fan_speed": 100}},
+    {"text": "light blue",                             "expect": {"led": "blue"}},
+    {"text": "make the light red",                     "expect": {"led": "red"}},
+    {"text": "turn off the light",                     "expect": {"led": "off"}},
+    {"text": "set the led to green",                   "expect": {"led": "green"}},
+    {"text": "turn off the light and start the fan",   "expect": {"led": "off", "fan_on": true}},
+    {"text": "fan 50 and light purple",                "expect": {"fan_speed": 50, "led": "purple"}},
+    {"text": "light white",                            "expect": {"led": "white"}}
+  ],
+
+  "noncommand": [
+    {"text": "is the fan on?"},
+    {"text": "led is white yet"},
+    {"text": "the fan is still off"},
+    {"text": "what colour is the light?"},
+    {"text": "hello",
+     "_note": "greeting, no action"},
+    {"text": "don't turn on the fan"}
+  ],
+
+  "vague": [
+    {"text": "I'm hot",          "expect": {"fan_speed": 100}, "_src": "learned preference"},
+    {"text": "feeling warm",     "expect": {"led": "yellow"},  "_src": "learned preference"},
+    {"text": "I'm cold",         "expect": {"fan_speed": 50, "led": "white"}, "_src": "learned preference"},
+    {"text": "make it cosy",     "expect": {"light_family": "calm"}, "_note": "no learned pref; calm/warm is acceptable"},
+    {"text": "as usual",         "expect": {"usual": true}, "_note": "applies the habit for now"},
+    {"text": "I'm sad",          "expect": {"light_family": "calm"}, "_note": "no fixed answer; graded loosely"}
+  ]
+}

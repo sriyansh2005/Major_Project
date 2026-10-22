@@ -1,0 +1,13 @@
+{
+  "_README": "Ground-truth habits in events.db (the Oct 2026 data the Pi learned from), used to score habit precision/recall. Derived from source='user' commands grouped by day_type+slot, applying the Phase 7 floor (>=3 times AND >=60% of the days seen in that slot). 'fan' is the band (off / low=30 / half=50 / high=90); 'light' is the colour family (calm=blue/purple/cyan/magenta, bright=white/yellow, vivid=red/green, off). NOTE: rebuilt from events.db, not data/synthetic_events.db (a different, older September dataset).",
+
+  "habits": [
+    {"id": "weekday_early",         "day_type": "weekday", "slot": "early",   "fan": "low",  "light": "bright", "days_seen": 14, "times": 14, "note": "morning: fan low, light bright"},
+    {"id": "weekday_evening",       "day_type": "weekday", "slot": "evening", "fan": "low",  "light": "bright", "days_seen": 14, "times": 13, "note": "evening: fan low, light bright"},
+    {"id": "weekday_night_relax",   "day_type": "weekday", "slot": "night",   "fan": "low",  "light": "calm",   "days_seen": 14, "times": 14, "note": "relax: fan low, light calm (earlier half of night)"},
+    {"id": "weekday_night_bedtime", "day_type": "weekday", "slot": "night",   "fan": "low",  "light": "off",    "days_seen": 14, "times": 14, "note": "bedtime: fan low, light off (later half of night)"},
+    {"id": "weekend_late",          "day_type": "weekend", "slot": "late",    "fan": "low",  "light": "off",    "days_seen": 6,  "times": 6,  "note": "late night: fan low, light off"},
+    {"id": "weekend_midday",        "day_type": "weekend", "slot": "midday",  "fan": "any",  "light": "bright", "days_seen": 6,  "times": 6,  "note": "weekend midday: light bright (fan varies low/high)"},
+    {"id": "weekend_morning",       "day_type": "weekend", "slot": "morning", "fan": "high", "light": "bright", "days_seen": 3,  "times": 3,  "note": "weekend morning: fan high, light bright (weak, only 3 days)"}
+  ]
+}
