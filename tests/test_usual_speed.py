@@ -114,8 +114,9 @@ ctx = pt.now_context(ps, datetime(2026, 10, 3, 23, 0), room)
 check("Sat 23:00: weekend bedtime at 00:00 IS mentioned", "Next habit: from Sunday 00:00" in ctx, ctx)
 
 print("\nU4  speed settings")
-check("system prompt has no habit list (short, identical every call)",
-      agent.build_system_prompt() == agent.SYSTEM_PROMPT and "Weekdays:" not in agent.build_system_prompt())
+check("system prompt is identical every call (stable profile, Ollama can cache it)",
+      agent.build_system_prompt() == agent.build_system_prompt()
+      and agent.build_system_prompt().startswith(agent.SYSTEM_PROMPT))
 sent = {}
 
 
