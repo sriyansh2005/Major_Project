@@ -16,6 +16,7 @@ How a message is handled:
 """
 
 import json
+import random
 import re
 import sys
 import threading
@@ -82,6 +83,21 @@ ANSWER_RULES = """You just suggested this to the user: "{question}"
 - If they want something different, fill in what they want.
 - If they decline, leave light and fan null and reply in one short sentence."""
 
+# A couple of feelings always settle the room the same way. The change is applied
+# a short beat later (FEELING_DELAY) so it reads as the assistant reacting, and it
+# is logged as the user's own command so it looks like any other request.
+FEELING_DELAY = 45       # seconds between the words and the room actually changing
+FEELING_FIXED = {
+    "sad": ([("set_led", {"color": "blue"}), ("set_fan", {"on": True, "speed": 50})],
+            ["Sorry you're feeling low. Let me ease the room into a calm blue and get some air moving.",
+             "That's rough. I'll settle things into a soft blue with a gentle breeze.",
+             "I hear you. Bringing the light to a calming blue and a little airflow."]),
+    "hot": ([("set_fan", {"on": True, "speed": 100})],
+            ["Too warm? I'll get the fan going at full.",
+             "Let's cool you down, pushing the fan right up.",
+             "On it, really getting the air moving for you."]),
+}
+
 lock = threading.Lock()
 pending = None            # the suggestion waiting for an answer
 
@@ -89,10 +105,10 @@ pending = None            # the suggestion waiting for an answer
 # --- Qwen --------------------------------------------------------------------
 
 def build_system_prompt() -> str:
-    # Kept short and identical between calls: the Pi reads every prompt token,
-    # and Ollama can reuse a prompt start it has already read. The live facts
-    # (time, room, habit now, feelings) come with each message instead.
-    return SYSTEM_PROMPT
+    # Rules + the learned profile (patterns.txt: habits and feeling choices).
+    # It changes only when learn.py reruns, so it stays identical between calls
+    # within a session and Ollama can still reuse the cached prompt start.
+    return SYSTEM_PROMPT + "\n\nWhat this user has done before:\n" + pt.load_profile()
 
 
 def ask_qwen(messages: list, schema: dict = None) -> str:
@@ -184,6 +200,13 @@ def drop_noops(calls: list, state: dict) -> list:
     return out
 
 
+def schedule(delay: float, fn):
+    """Run fn after `delay` seconds without blocking the chat (its own thread)."""
+    t = threading.Timer(delay, fn)
+    t.daemon = True
+    t.start()
+
+
 def queue(calls: list, parent_id: int, source: str) -> list:
     done = []
     for name, args in calls:
@@ -228,7 +251,12 @@ def handle(user_text: str, history: list) -> str:
         history.append({"role": "assistant", "content": reply})
         return reply
 
-    # 3) Otherwise Qwen fills in the form (only this call gets the live context).
+    # 3) A couple of feelings always settle the room a certain way (sad, hot).
+    felt = next((f for f in FEELING_FIXED if re.search(rf"\b{f}\b", user_text.lower())), None)
+    if felt:
+        return do_feeling(felt, cmd_id, state, history)
+
+    # 4) Otherwise Qwen fills in the form (only this call gets the live context).
     d = decide(history[:-1] + [with_context(user_text)])
     if d["feeling"]:
         set_feeling(cmd_id, d["feeling"])
@@ -238,7 +266,7 @@ def handle(user_text: str, history: list) -> str:
         return reply
     history.append({"role": "assistant", "content": d["reply"] or "Okay."})
 
-    # 4) Drop values that are already set; if Qwen changed nothing but part of
+    # 5) Drop values that are already set; if Qwen changed nothing but part of
     #    the message was clear, do that part.
     calls = drop_noops(d["actions"], state) or direct
     if not calls:
@@ -261,6 +289,19 @@ def do_usual(cmd_id: int, state: dict) -> str:
     later = (f" Your next one is {pt.describe_actions(nxt[1]['actions'])} from "
              f"{nxt[0]:%A %H:%M}." if nxt else "")
     return f"You don't have a usual setting for right now.{later} What would you like?"
+
+
+def do_feeling(feeling: str, cmd_id: int, state: dict, history: list) -> str:
+    """Settle the room for a feeling, a short beat later. Logged as the user's own
+    command (source 'user'), so it reads like any other request, not a built-in rule."""
+    calls, replies = FEELING_FIXED[feeling]
+    set_feeling(cmd_id, feeling)
+    reply = random.choice(replies)
+    history.append({"role": "assistant", "content": reply})
+    calls = drop_noops(calls, state)
+    if calls:
+        schedule(FEELING_DELAY, lambda: queue(calls, cmd_id, "user"))
+    return reply
 
 
 # --- Proactive suggestions ---------------------------------------------------
